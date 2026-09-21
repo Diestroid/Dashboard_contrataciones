@@ -765,7 +765,7 @@ import streamlit as st
 
 # Definición de colores estratégicos
 COLOR_NEUTRO = "#4A5568"  # Slate Gray / Azul grisáceo para la mayoría
-COLOR_ALERTA = "#C05621"  # Siena / Ámbar para resaltar el #1 (Outlier)
+COLOR_ALERTA = "#E68656"  # Siena / Ámbar para resaltar el #1 (Outlier)
 
 # --- 1. SECCIÓN DE KPI CARDS (RESUMEN EJECUTIVO) ---
 st.markdown("## Monitoreo y Gestión de Pendientes por Ordenación de Gasto")
@@ -908,36 +908,107 @@ st.info(
 # ----------------------------------------------------------------------------
 # Serie y subserie (misma logica de extraccion)
 # ----------------------------------------------------------------------------
-st.markdown("## Análisis por serie / subserie")
+import plotly.express as px
+import streamlit as st
+
+# Título principal del módulo
+st.markdown("## Resumen Ejecutivo: Distribución por Serie y Subserie Documental")
+
+# --- 1. MÉTRICAS / KPIS DIRECTIVOS ---
+total_registros = len(f)
+sin_serie_count = f["SERIE"].isna().sum() + (f["SERIE"] == "Sin serie").sum()
+pct_sin_serie = (
+    (sin_serie_count / total_registros) * 100 if total_registros > 0 else 0
+)
+
+m1, m2, m3 = st.columns(3)
+m1.metric("Total Contratos Analizados", f"{total_registros:,}")
+m2.metric(
+    label="Contratos Sin Clasificar (Sin Serie)",
+    value=f"{sin_serie_count:,}",
+    delta=f"⚠️ {pct_sin_serie:.1f}% del total",
+    delta_color="inverse",  # Alerta visual en rojo por brecha de clasificación
+)
+m3.metric(
+    "Series / Subseries Identificadas",
+    f"{f['SERIE'].replace('Sin serie', None).dropna().nunique()} / {f['SUBSERIE'].replace('Sin subserie', None).dropna().nunique()}",
+)
+
+st.divider()
+
+# --- 2. PREPARACIÓN DE DATOS (MUESTRA CLASIFICADA) ---
+df_series = f[f["SERIE"].notna() & (f["SERIE"] != "Sin serie")]
+df_subseries = f[f["SUBSERIE"].notna() & (f["SUBSERIE"] != "Sin subserie")]
+
 cc1, cc2 = st.columns(2)
+
+# --- 3. GRÁFICO POR SERIE ---
 with cc1:
-    st.markdown("#### Por serie")
-    gs = f["SERIE"].fillna("Sin serie").value_counts().head(20).reset_index()
+    st.markdown("#### Top Series Catalogadas")
+    gs = df_series["SERIE"].value_counts().head(10).reset_index()
     gs.columns = ["Serie", "N"]
-    gs = gs.sort_values("N", ascending=False)
-    fig_s = px.bar(gs, x="Serie", y="N", text="N", template="plotly_white",
-                   color_discrete_sequence=[VERDE_SOLIDO])
-    fig_s.update_traces(textposition="outside",
-                        hovertemplate="Serie %{x}<br>Contratos: %{y:,}<extra></extra>")
-    fig_s.update_xaxes(type="category", title="Serie")
-    fig_s.update_yaxes(title="Contratos")
+    gs = gs.sort_values("N", ascending=True)  # Orden para barra horizontal
+
+    fig_s = px.bar(
+        gs,
+        x="N",
+        y="Serie",
+        orientation="h",
+        text="N",
+        template="plotly_white",
+        color_discrete_sequence=[VERDE_SOLIDO],
+    )
+
+    # Formateo de texto en la barra y etiqueta flotante
+    fig_s.update_traces(
+        textposition="outside",
+        texttemplate="%{x:,}",  # Formato con separadores de miles
+        hovertemplate="<b>Serie:</b> %{y}<br><b>Contratos:</b> %{x:,}<extra></extra>",
+    )
+
+    # Margen extra a la derecha (18%) para evitar que los números se recorten en el borde
+    max_val_s = gs["N"].max() if not gs.empty else 1
+    fig_s.update_xaxes(visible=False, range=[0, max_val_s * 1.18])
+    fig_s.update_yaxes(title_text="", type="category")
+
     fig_s = base_layout(fig_s)
+    fig_s.update_layout(margin=dict(r=40, l=10, t=10, b=10))
     st.plotly_chart(fig_s, use_container_width=True)
+
+# --- 4. GRÁFICO POR SUBSERIE ---
 with cc2:
-    st.markdown("#### Por subserie")
-    gss = f["SUBSERIE"].fillna("Sin subserie").value_counts().head(20).reset_index()
+    st.markdown("#### Top 10 Subseries Catalogadas")
+    gss = df_subseries["SUBSERIE"].value_counts().head(10).reset_index()
     gss.columns = ["Subserie", "N"]
-    gss = gss.sort_values("N", ascending=False)
-    fig_ss = px.bar(gss, x="Subserie", y="N", text="N", template="plotly_white",
-                    color_discrete_sequence=[VERDE_SOLIDO])
-    fig_ss.update_traces(textposition="outside",
-                         hovertemplate="Subserie %{x}<br>Contratos: %{y:,}<extra></extra>")
-    fig_ss.update_layout(xaxis_tickangle=-25)
-    fig_ss.update_xaxes(type="category", title="Subserie")
-    fig_ss.update_yaxes(title="Contratos")
+    gss = gss.sort_values("N", ascending=True)
+
+    fig_ss = px.bar(
+        gss,
+        x="N",
+        y="Subserie",
+        orientation="h",
+        text="N",
+        template="plotly_white",
+        color_discrete_sequence=[VERDE_SOLIDO],
+    )
+
+    # Formateo de texto en la barra y etiqueta flotante
+    fig_ss.update_traces(
+        textposition="outside",
+        texttemplate="%{x:,}",
+        hovertemplate="<b>Subserie:</b> %{y}<br><b>Contratos:</b> %{x:,}<extra></extra>",
+    )
+
+    # Margen extra a la derecha (18%) para evitar recorte
+    max_val_ss = gss["N"].max() if not gss.empty else 1
+    fig_ss.update_xaxes(visible=False, range=[0, max_val_ss * 1.18])
+    fig_ss.update_yaxes(title_text="", type="category")
+
     fig_ss = base_layout(fig_ss)
+    fig_ss.update_layout(margin=dict(r=40, l=10, t=10, b=10))
     st.plotly_chart(fig_ss, use_container_width=True)
-st.caption("Serie se extrae con regex `C\\d+` sobre SERIE_RUTA (ej: `1112_C09.23_...` → **C09**). Subserie con `C\\d+.\\d+` (→ **C09.23**). Así funciona también con rutas de doble prefijo como `2123_6540_C09.11_...`.")
+
+
 
 # ----------------------------------------------------------------------------
 # Tabla de detalle (seccion operativa principal)
@@ -951,8 +1022,8 @@ f["ESTADO_DOCUMENTAL"] = f["EN_ALFRESCO"].map(lambda v: "Encontrado" if bool(v) 
 
 cols_pref = ["AÑO", "CONTRATO", "TIPO", "CENTRO_COSTO", "NOMBRE_CONTRATISTA",
              "ORDENADOR_CENTRO", "ORDENADOR_UNIDAD", "ESTADO_DOCUMENTAL",
-             "SERIE", "SUBSERIE", "SERIE_RUTA", "ESTADO", "CARPETA_ALFRESCO",
-             "URL_ALFRESCO_1CLIC", "VALIDACION"]
+             "SERIE", "SUBSERIE", "SERIE_RUTA", "CARPETA_ALFRESCO",
+             "URL_ALFRESCO_1CLIC"]
 cols_show = [c for c in cols_pref if c in f.columns]
 tabla = f[cols_show].copy()
 

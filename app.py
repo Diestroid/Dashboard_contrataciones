@@ -711,17 +711,30 @@ tabla_tipos["Total Contratos"] = tabla_tipos["Contratos Faltantes"] + tabla_tipo
 tabla_tipos["Tipo de Contrato"] = tabla_tipos["CODIGO"].map(
     lambda c: f"{c} – {catalogo_tipos[c]}" if c in catalogo_tipos else str(c)
 )
-tabla_tipos = tabla_tipos[["Tipo de Contrato", "Contratos Faltantes", "Contratos Encontrados", "Total Contratos"]]
-tabla_tipos = tabla_tipos.sort_values("Total Contratos", ascending=False).reset_index(drop=True)
+# 1) Ordenar SOLO las filas de detalle de mayor a menor por total.
+tabla_tipos = (
+    tabla_tipos[["Tipo de Contrato", "Contratos Faltantes", "Contratos Encontrados", "Total Contratos"]]
+    .sort_values("Total Contratos", ascending=False)
+    .reset_index(drop=True)
+)
+# 2) Calcular % de faltantes por tipo (0-100, sin division por cero).
+tabla_tipos["% Faltantes"] = (
+    tabla_tipos["Contratos Faltantes"] / tabla_tipos["Total Contratos"].replace(0, pd.NA)
+).fillna(0) * 100
 
 if tabla_tipos.empty:
     st.info("Sin datos de tipos de contrato bajo el filtro actual.")
 else:
+    # 3) Concatenar la fila de resumen AL FINAL, despues de ordenar.
+    _tot_falt = int(tabla_tipos["Contratos Faltantes"].sum())
+    _tot_enc = int(tabla_tipos["Contratos Encontrados"].sum())
+    _tot = int(tabla_tipos["Total Contratos"].sum())
     total_row = pd.DataFrame([{
         "Tipo de Contrato": "Total general",
-        "Contratos Faltantes": int(tabla_tipos["Contratos Faltantes"].sum()),
-        "Contratos Encontrados": int(tabla_tipos["Contratos Encontrados"].sum()),
-        "Total Contratos": int(tabla_tipos["Total Contratos"].sum()),
+        "Contratos Faltantes": _tot_falt,
+        "Contratos Encontrados": _tot_enc,
+        "Total Contratos": _tot,
+        "% Faltantes": (_tot_falt / _tot * 100) if _tot else 0.0,
     }])
     tabla_tipos = pd.concat([tabla_tipos, total_row], ignore_index=True)
     st.dataframe(
@@ -730,53 +743,82 @@ else:
         hide_index=True,
         column_config={
             "Tipo de Contrato": st.column_config.TextColumn("Tipo de Contrato", width="large"),
-            "Contratos Faltantes": st.column_config.NumberColumn("Contratos Faltantes", format="localized"),
-            "Contratos Encontrados": st.column_config.NumberColumn("Contratos Encontrados", format="localized"),
-            "Total Contratos": st.column_config.NumberColumn("Total Contratos", format="localized"),
+            "Contratos Faltantes": st.column_config.NumberColumn("Contratos Faltantes", format="%d"),
+            "Contratos Encontrados": st.column_config.NumberColumn("Contratos Encontrados", format="%d"),
+            "Total Contratos": st.column_config.NumberColumn("Total Contratos", format="%d"),
+            "% Faltantes": st.column_config.ProgressColumn(
+                "% Faltantes", min_value=0, max_value=100, format="%.1f %%",
+                help="% de contratos faltantes (No encontrado) sobre el total del tipo.",
+            ),
         },
     )
 
 # ----------------------------------------------------------------------------
 # Centros de costo y ordenadores
 # ----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# Centros de costo y ordenadores (col. G = ORDENADOR_CENTRO, col. H = ORDENADOR_UNIDAD)
+# ----------------------------------------------------------------------------
 st.markdown("## Centros de costo y ordenadores")
-st.caption("Barras horizontales ordenadas de mayor a menor. El valor se muestra al final de cada barra.")
+st.caption("Top 15 de la columna G (ordenador del centro de costo) y la columna H (ordenador de la unidad superior) del Excel.")
+
+
+def fig_top_ordenadores(serie, n=15, max_len=32, height=None):
+    """Barra horizontal Top-N reutilizable: etiqueta truncada + nombre completo en hover.
+
+    - `serie`: columna de nombres (ORDENADOR_CENTRO u ORDENADOR_UNIDAD).
+    - Eje X con `range=[0, max*1.18]` para que el valor nunca se corte.
+    - `autorange='reversed'` para que el #1 quede arriba.
+    """
+    s = serie.dropna().astype("string").str.strip() if serie is not None else pd.Series(dtype="string")
+    s = s[s != ""]
+    g = s.value_counts().head(n).reset_index()
+    g.columns = ["Nombre", "N"]
+    g = g.sort_values("N", ascending=False).reset_index(drop=True)  # #1 primero
+    if g.empty:
+        return None
+    largos = g["Nombre"].str.len()
+    g["Etiqueta"] = g["Nombre"].str.slice(0, max_len)
+    g.loc[largos > max_len, "Etiqueta"] = g.loc[largos > max_len, "Etiqueta"] + "..."
+    max_val = int(g["N"].max())
+    fig = px.bar(
+        g, x="N", y="Etiqueta", orientation="h", text="N",
+        template="plotly_white", color_discrete_sequence=[VERDE_SOLIDO],
+        custom_data=["Nombre"],
+    )
+    fig.update_traces(
+        textposition="outside",
+        texttemplate="%{text:,}",
+        hovertemplate="%{customdata[0]}<br>Contratos: %{x:,}<extra></extra>",
+    )
+    fig.update_xaxes(title="Contratos", range=[0, max_val * 1.18])
+    fig.update_yaxes(title=None, autorange="reversed", tickfont=dict(size=11))
+    return base_layout(fig, height=height or max(360, 32 * len(g) + 120))
+
 
 c5, c6 = st.columns(2)
 with c5:
-    st.markdown("#### Top 15 centros de costo")
-    g5 = f["CENTRO_COSTO"].fillna("Sin centro").value_counts().head(15).reset_index()
-    g5.columns = ["Centro", "N"]
-    g5 = g5.sort_values("N", ascending=True)
-    g5["Centro_corto"] = g5["Centro"].str.slice(0, 52)
-    fig5 = px.bar(g5, x="N", y="Centro_corto", orientation="h", text="N",
-                  template="plotly_white", color_discrete_sequence=[VERDE_SOLIDO],
-                  custom_data=["Centro"])
-    fig5.update_traces(textposition="outside",
-                       hovertemplate="%{customdata[0]}<br>Contratos: %{x:,}<extra></extra>")
-    fig5.update_xaxes(title="Contratos")
-    fig5.update_yaxes(title=None, tickfont=dict(size=11))
-    fig5 = base_layout(fig5, height=520)
-    fig5.update_layout(margin=dict(l=240, r=40, t=40, b=20))
-    st.plotly_chart(fig5, use_container_width=True)
+    st.markdown("#### Top 15 ordenadores del centro de costo")
+    st.caption("Columna G del Excel (ORDENADOR_CENTRO).")
+    if "ORDENADOR_CENTRO" not in f.columns:
+        st.warning("El Excel no trae la columna ORDENADOR_CENTRO (col. G).")
+    else:
+        fig5 = fig_top_ordenadores(f["ORDENADOR_CENTRO"])
+        if fig5 is None:
+            st.info("Sin datos de ordenadores del centro de costo bajo el filtro actual.")
+        else:
+            st.plotly_chart(fig5, use_container_width=True)
 with c6:
-    st.markdown("#### Top 15 ordenadores")
-    ord_serie = pd.concat([f["ORDENADOR_CENTRO"], f["ORDENADOR_UNIDAD"]]).dropna()
-    ord_serie = ord_serie[ord_serie.str.strip() != ""]
-    g6 = ord_serie.value_counts().head(15).reset_index()
-    g6.columns = ["Ordenador", "N"]
-    g6 = g6.sort_values("N", ascending=True)
-    g6["Ordenador_corto"] = g6["Ordenador"].str.slice(0, 42)
-    fig6 = px.bar(g6, x="N", y="Ordenador_corto", orientation="h", text="N",
-                  template="plotly_white", color_discrete_sequence=[VERDE_SOLIDO],
-                  custom_data=["Ordenador"])
-    fig6.update_traces(textposition="outside",
-                       hovertemplate="%{customdata[0]}<br>Contratos: %{x:,}<extra></extra>")
-    fig6.update_xaxes(title="Contratos")
-    fig6.update_yaxes(title=None, tickfont=dict(size=11))
-    fig6 = base_layout(fig6, height=520)
-    fig6.update_layout(margin=dict(l=220, r=40, t=40, b=20))
-    st.plotly_chart(fig6, use_container_width=True)
+    st.markdown("#### Top 15 ordenadores de la unidad superior")
+    st.caption("Columna H del Excel (ORDENADOR_UNIDAD).")
+    if "ORDENADOR_UNIDAD" not in f.columns:
+        st.warning("El Excel no trae la columna ORDENADOR_UNIDAD (col. H).")
+    else:
+        fig6 = fig_top_ordenadores(f["ORDENADOR_UNIDAD"])
+        if fig6 is None:
+            st.info("Sin datos de ordenadores de la unidad superior bajo el filtro actual.")
+        else:
+            st.plotly_chart(fig6, use_container_width=True)
 
 # ----------------------------------------------------------------------------
 # Serie y subserie (misma logica de extraccion)

@@ -32,7 +32,7 @@ PALETA = {
     "primario": "#1B5E20",
     "primario_suave": "#E8F2EA",
     "en_alfresco": "#1B7A3D",
-    "pendiente": "#B45309",
+    "pendiente": "#B42309",
     "pendiente_suave": "#FBEEDC",
 }
 
@@ -404,10 +404,10 @@ with st.sidebar:
 # ----------------------------------------------------------------------------
 # Encabezado (la fuente tecnica no domina visualmente)
 # ----------------------------------------------------------------------------
-st.markdown("# Dashboard de Contratos — Alfresco")
+st.markdown("# Gestión Documental de Contratos en Alfresco")
 st.markdown(
-    '<p class="subtitulo">Seguimiento y control de la disponibilidad documental '
-    "de los contratos en Alfresco.</p>",
+    '<p class="subtitulo">Monitoreo de la disponibilidad y estado de los contratos en Alfresco.'
+    "</p>",
     unsafe_allow_html=True,
 )
 
@@ -420,12 +420,6 @@ if df.empty:
     )
     st.stop()
 
-st.markdown(
-    f'<p class="fuente-datos">Fuente: <code>{DATA_DIR_ACTIVA}</code> · '
-    f"{len(archivos)} archivo(s): {', '.join(archivos)} · "
-    f"Total filas cargadas: <b>{fmt_num(len(df))}</b></p>",
-    unsafe_allow_html=True,
-)
 
 # ----------------------------------------------------------------------------
 # Filtros activos (los controles estan en la barra lateral izquierda)
@@ -449,8 +443,8 @@ if sel_sub:
     _partes.append(f"Subseries: {', '.join(sel_sub)}")
 if texto.strip():
     _partes.append(f"Búsqueda: “{texto.strip()}”")
-st.caption("Filtros activos → " + (" · ".join(_partes) if _partes else "sin filtros")
-           + ". Se ajustan en la barra lateral izquierda.")
+#st.caption("Filtros activos → " + (" · ".join(_partes) if _partes else "sin filtros")
+         #  + ". Se ajustan en la barra lateral izquierda.")
 
 # ----------------------------------------------------------------------------
 # Aplicar filtros (logica original intacta)
@@ -519,7 +513,7 @@ with s1:
     fig2 = px.pie(
         g2, names="Situación", values="N", hole=0.55,
         color="Situación",
-        color_discrete_map={"En Alfresco": PALETA["en_alfresco"], "Pendientes": "#D9C7A7"},
+        color_discrete_map={"En Alfresco": PALETA["en_alfresco"], "Pendientes": "#E41805"},
         template="plotly_white",
     )
     fig2.update_traces(textinfo="value", textfont_size=13,

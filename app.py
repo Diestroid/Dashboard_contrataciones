@@ -543,12 +543,7 @@ with s2:
             f'<span class="pill pill-pend">Pendientes: {fmt_num(pend)}</span>',
             unsafe_allow_html=True,
         )
-    st.info(
-        "Lectura rápida: si la barra está por debajo del 50 %, más de la mitad de los "
-        "contratos filtrados aún no tienen documentación en Alfresco. Usa el filtro "
-        "“Estado documental → No encontrado” para trabajar solo sobre ese grupo.",
-        icon="ℹ️",
-    )
+
 
 # ----------------------------------------------------------------------------
 # Analisis por año y estado
@@ -558,45 +553,188 @@ c3, c4 = st.columns(2)
 with c3:
     st.markdown("#### Contratos no encontrados por año")
     st.caption("Refleja el filtro actual. Para ver solo pendientes, filtra Estado documental → No encontrado.")
+        
     g3 = f.groupby("AÑO").size().reset_index(name="N").sort_values("AÑO")
-    fig3 = px.bar(g3, x="AÑO", y="N", text="N", template="plotly_white",
-                  color_discrete_sequence=[VERDE_SOLIDO])
-    fig3.update_traces(textposition="outside",
-                       hovertemplate="Año %{x}<br>Contratos: %{y:,}<extra></extra>")
-    fig3.update_xaxes(type="category", title="Año")
-    fig3.update_yaxes(title="Contratos")
+        
+        # 1. Crear gráfico de área/línea para darle mayor presencia visual
+    fig3 = px.line(
+            g3, 
+            x="AÑO", 
+            y="N", 
+            text="N", 
+            markers=True, 
+            template="plotly_white",
+            color_discrete_sequence=[VERDE_SOLIDO]
+        )
+        
+        # Formatear el texto a miles con separador (ej: 7,389 o 7.389)
+    fig3.update_traces(
+            texttemplate="%{text:,}",          # Formato con miles
+            textposition="top center",          # Posición encima del punto
+            textfont=dict(size=14, family="Arial Black", color="#1E293B"), # Números más grandes y legibles
+            marker=dict(size=10, symbol="circle"), # Puntos de la línea más grandes
+            hovertemplate="Año %{x}<br>Contratos faltantes: %{y:,}<extra></extra>"
+        )
+        
+        # 2. Ajustar rangos de los ejes para que el texto superior/inferior no se corte ni cruce
+    min_y = g3["N"].min() * 0.85
+    max_y = g3["N"].max() * 1.12
+        
+    fig3.update_xaxes(
+            type="category", 
+            title="Año de suscripción",
+            tickfont=dict(size=13)
+        )
+        
+    fig3.update_yaxes(
+            title="<b>Contratos faltantes</b>", # Título del eje más claro y explícito
+            range=[min_y, max_y],              # Margen suficiente para que las etiquetas no colisionen
+            showgrid=True,
+            gridcolor="#E2E8F0"
+        )
+        
     fig3 = base_layout(fig3)
     st.plotly_chart(fig3, use_container_width=True)
-with c4:
-    st.markdown("#### Por estado")
-    st.caption("Distribución del campo ESTADO original.")
-    g = f["ESTADO"].fillna("Sin estado").value_counts().reset_index()
-    g.columns = ["Estado", "N"]
-    g = g.sort_values("N", ascending=False)
-    fig = px.bar(g, x="Estado", y="N", text="N", template="plotly_white",
-                 color_discrete_sequence=[VERDE_SOLIDO])
-    fig.update_traces(textposition="outside",
-                      hovertemplate="%{x}<br>Contratos: %{y:,}<extra></extra>")
-    fig.update_layout(xaxis_tickangle=-20, xaxis_title="Estado", yaxis_title="Contratos")
-    fig = base_layout(fig)
-    st.plotly_chart(fig, use_container_width=True)
+
 
 # ----------------------------------------------------------------------------
 # Analisis por tipo de contrato
 # ----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# Analisis por tipo de contrato (tabla estructurada con catalogo de nombres)
+# ----------------------------------------------------------------------------
 st.markdown("## Análisis por tipo de contrato")
-st.caption("Tipos ordenados de mayor a menor cantidad.")
-g4 = f["TIPO"].fillna("Sin tipo").value_counts().reset_index()
-g4.columns = ["Tipo", "N"]
-g4 = g4.sort_values("N", ascending=True)  # ascendente para barra horizontal legible
-fig4 = px.bar(g4, x="N", y="Tipo", orientation="h", text="N", template="plotly_white",
-              color_discrete_sequence=[VERDE_SOLIDO])
-fig4.update_traces(textposition="outside",
-                   hovertemplate="Tipo %{y}<br>Contratos: %{x:,}<extra></extra>")
-fig4.update_xaxes(title="Contratos")
-fig4.update_yaxes(title="Tipo", type="category")
-fig4 = base_layout(fig4, height=max(320, 60 * len(g4) + 80))
-st.plotly_chart(fig4, use_container_width=True)
+st.caption("Estos contratos pertenecen a estos 8 tipos de modalidades contractuales ante los entes de control")
+
+
+@st.cache_data(show_spinner=False)
+def cargar_catalogo_tipos(data_dir):
+    """Lee el catálogo código -> nombre completo desde data/.
+
+    Prioridad: tipos_contrato.csv > tipos_contrato.xlsx > cualquier
+    *tipo*.csv/xlsx/txt. El .txt admite líneas 'CODIGO -> Nombre'.
+    Devuelve dict {codigo_str: nombre}.
+    """
+    import glob as _glob
+
+    dirs = []
+    for d in (data_dir, DEFAULT_DATA_DIR):
+        if d and os.path.isdir(d) and os.path.abspath(d) not in [os.path.abspath(x) for x in dirs]:
+            dirs.append(d)
+
+    patrones_csv = ["tipos_contrato.csv", "tipo_contrato.csv", "*tipo*.csv"]
+    patrones_xlsx = ["tipos_contrato.xlsx", "tipo_contrato.xlsx", "*tipo*.xlsx"]
+    patrones_txt = ["*tipo*.txt"]
+
+    def _normalizar(df):
+        df.columns = [str(c).strip().upper() for c in df.columns]
+        col_cod = next((c for c in ("TIPO", "CODIGO", "CÓDIGO", "CODE", "ID") if c in df.columns), None)
+        col_nom = next(
+            (c for c in ("NOMBRE", "NOMBRE_COMPLETO", "DESCRIPCION", "DESCRIPCIÓN", "TIPO_NOMBRE") if c in df.columns),
+            None,
+        )
+        if col_cod is None:
+            col_cod = df.columns[0]
+        if col_nom is None:
+            col_nom = df.columns[1] if len(df.columns) > 1 else df.columns[0]
+        out = {}
+        for _, row in df[[col_cod, col_nom]].dropna(how="all").iterrows():
+            cod = "" if pd.isna(row[col_cod]) else str(row[col_cod]).strip()
+            nom = "" if pd.isna(row[col_nom]) else str(row[col_nom]).strip()
+            if cod:
+                out[cod] = nom or cod
+        return out
+
+    for d in dirs:
+        for pat in patrones_csv:
+            for path in sorted(_glob.glob(os.path.join(d, pat))):
+                if os.path.basename(path).startswith("~$"):
+                    continue
+                try:
+                    for enc in ("utf-8-sig", "utf-8", "latin-1"):
+                        try:
+                            return _normalizar(pd.read_csv(path, dtype=str, encoding=enc))
+                        except UnicodeDecodeError:
+                            continue
+                except Exception:
+                    continue
+        for pat in patrones_xlsx:
+            for path in sorted(_glob.glob(os.path.join(d, pat))):
+                if os.path.basename(path).startswith("~$"):
+                    continue
+                try:
+                    return _normalizar(pd.read_excel(path, engine="openpyxl", dtype=str))
+                except Exception:
+                    continue
+        for pat in patrones_txt:
+            for path in sorted(_glob.glob(os.path.join(d, pat))):
+                try:
+                    with open(path, encoding="utf-8-sig") as fh:
+                        lineas = fh.read().splitlines()
+                except (OSError, UnicodeError):
+                    continue
+                out = {}
+                for ln in lineas:
+                    if "->" not in ln:
+                        continue
+                    cod, _, nom = ln.partition("->")
+                    cod, nom = cod.strip(), nom.strip()
+                    if cod and nom and re.search(r"\d", cod):
+                        out[cod] = nom
+                if out:
+                    return out
+    return {}
+
+
+catalogo_tipos = cargar_catalogo_tipos(DATA_DIR_ACTIVA)
+
+if "TIPO" in f.columns:
+    _tmp = f[["TIPO", "EN_ALFRESCO"]].copy()
+    _tmp["COD"] = _tmp["TIPO"].fillna("Sin tipo").astype("string").str.strip().replace("", "Sin tipo")
+else:
+    _tmp = pd.DataFrame({"COD": pd.Series(dtype=str), "EN_ALFRESCO": pd.Series(dtype=bool)})
+    _tmp["COD"] = "Sin tipo"
+
+_tmp["ESTADO_DOCUMENTAL"] = _tmp["EN_ALFRESCO"].map(lambda v: "Encontrado" if bool(v) else "No encontrado")
+cruce = pd.crosstab(_tmp["COD"], _tmp["ESTADO_DOCUMENTAL"])
+for _col in ("No encontrado", "Encontrado"):
+    if _col not in cruce.columns:
+        cruce[_col] = 0
+tabla_tipos = (
+    cruce[["No encontrado", "Encontrado"]]
+    .reset_index()
+    .rename(columns={"COD": "CODIGO", "No encontrado": "Contratos Faltantes", "Encontrado": "Contratos Encontrados"})
+)
+tabla_tipos["Contratos Faltantes"] = tabla_tipos["Contratos Faltantes"].fillna(0).astype(int)
+tabla_tipos["Contratos Encontrados"] = tabla_tipos["Contratos Encontrados"].fillna(0).astype(int)
+tabla_tipos["Total Contratos"] = tabla_tipos["Contratos Faltantes"] + tabla_tipos["Contratos Encontrados"]
+tabla_tipos["Tipo de Contrato"] = tabla_tipos["CODIGO"].map(
+    lambda c: f"{c} – {catalogo_tipos[c]}" if c in catalogo_tipos else str(c)
+)
+tabla_tipos = tabla_tipos[["Tipo de Contrato", "Contratos Faltantes", "Contratos Encontrados", "Total Contratos"]]
+tabla_tipos = tabla_tipos.sort_values("Total Contratos", ascending=False).reset_index(drop=True)
+
+if tabla_tipos.empty:
+    st.info("Sin datos de tipos de contrato bajo el filtro actual.")
+else:
+    total_row = pd.DataFrame([{
+        "Tipo de Contrato": "Total general",
+        "Contratos Faltantes": int(tabla_tipos["Contratos Faltantes"].sum()),
+        "Contratos Encontrados": int(tabla_tipos["Contratos Encontrados"].sum()),
+        "Total Contratos": int(tabla_tipos["Total Contratos"].sum()),
+    }])
+    tabla_tipos = pd.concat([tabla_tipos, total_row], ignore_index=True)
+    st.dataframe(
+        tabla_tipos,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Tipo de Contrato": st.column_config.TextColumn("Tipo de Contrato", width="large"),
+            "Contratos Faltantes": st.column_config.NumberColumn("Contratos Faltantes", format="localized"),
+            "Contratos Encontrados": st.column_config.NumberColumn("Contratos Encontrados", format="localized"),
+            "Total Contratos": st.column_config.NumberColumn("Total Contratos", format="localized"),
+        },
+    )
 
 # ----------------------------------------------------------------------------
 # Centros de costo y ordenadores

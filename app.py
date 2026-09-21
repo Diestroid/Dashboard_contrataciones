@@ -759,66 +759,151 @@ else:
 # ----------------------------------------------------------------------------
 # Centros de costo y ordenadores (col. G = ORDENADOR_CENTRO, col. H = ORDENADOR_UNIDAD)
 # ----------------------------------------------------------------------------
-st.markdown("## Centros de costo y ordenadores")
-st.caption("Top 15 de la columna G (ordenador del centro de costo) y la columna H (ordenador de la unidad superior) del Excel.")
+import plotly.express as px
+import plotly.graph_objects as go
+import streamlit as st
+
+# Definición de colores estratégicos
+COLOR_NEUTRO = "#4A5568"  # Slate Gray / Azul grisáceo para la mayoría
+COLOR_ALERTA = "#C05621"  # Siena / Ámbar para resaltar el #1 (Outlier)
+
+# --- 1. SECCIÓN DE KPI CARDS (RESUMEN EJECUTIVO) ---
+st.markdown("## Monitoreo y Gestión de Pendientes por Ordenación de Gasto")
+st.caption(
+    "Volumen de contratos pendientes de regularización o verificación "
+    "distribuidos por área de responsabilidad."
+)
+
+if "ORDENADOR_CENTRO" in f.columns and "ORDENADOR_UNIDAD" in f.columns:
+    tot_centro = f["ORDENADOR_CENTRO"].dropna().count()
+    tot_unidad = f["ORDENADOR_UNIDAD"].dropna().count()
+    total_general = max(tot_centro, tot_unidad)
+
+    k1, k2, k3 = st.columns(3)
+    k1.metric(
+        label="Total Pendientes",
+        value=f"{total_general:,}",
+        help="Total de registros que requieren seguimiento.",
+    )
+    k2.metric(
+        label="Áreas Evaluadas",
+        value=f"{f['ORDENADOR_CENTRO'].nunique():,}",
+        help="Número total de centros de costo con registros.",
+    )
+    k3.metric(
+        label="Unidades de Supervisión",
+        value=f"{f['ORDENADOR_UNIDAD'].nunique():,}",
+        help="Número total de unidades superiores registradas.",
+    )
+
+st.write("---")
 
 
+# --- 2. FUNCIÓN MEJORADA PARA EL GRÁFICO ---
 def fig_top_ordenadores(serie, n=15, max_len=32, height=None):
-    """Barra horizontal Top-N reutilizable: etiqueta truncada + nombre completo en hover.
+    """Barra horizontal Top-N con colorimetría condicional y limpieza visual."""
+    if serie is None:
+        return None
 
-    - `serie`: columna de nombres (ORDENADOR_CENTRO u ORDENADOR_UNIDAD).
-    - Eje X con `range=[0, max*1.18]` para que el valor nunca se corte.
-    - `autorange='reversed'` para que el #1 quede arriba.
-    """
-    s = serie.dropna().astype("string").str.strip() if serie is not None else pd.Series(dtype="string")
+    s = serie.dropna().astype("string").str.strip()
     s = s[s != ""]
+    if s.empty:
+        return None
+
     g = s.value_counts().head(n).reset_index()
     g.columns = ["Nombre", "N"]
-    g = g.sort_values("N", ascending=False).reset_index(drop=True)  # #1 primero
-    if g.empty:
-        return None
+    g = g.sort_values("N", ascending=False).reset_index(drop=True)
+
     largos = g["Nombre"].str.len()
     g["Etiqueta"] = g["Nombre"].str.slice(0, max_len)
-    g.loc[largos > max_len, "Etiqueta"] = g.loc[largos > max_len, "Etiqueta"] + "..."
+    g.loc[largos > max_len, "Etiqueta"] = (
+        g.loc[largos > max_len, "Etiqueta"] + "..."
+    )
+
+    # Colorimetría: la primera barra (#1) en ámbar/siena, el resto en gris neutro
+    colores = [COLOR_ALERTA] + [COLOR_NEUTRO] * (len(g) - 1)
+
     max_val = int(g["N"].max())
-    fig = px.bar(
-        g, x="N", y="Etiqueta", orientation="h", text="N",
-        template="plotly_white", color_discrete_sequence=[VERDE_SOLIDO],
-        custom_data=["Nombre"],
+
+    fig = go.Figure(
+        go.Bar(
+            x=g["N"],
+            y=g["Etiqueta"],
+            orientation="h",
+            text=g["N"],
+            textposition="outside",
+            texttemplate="%{text:,}",
+            customdata=g["Nombre"],
+            hovertemplate="<b>%{customdata}</b><br>Pendientes: %{x:,}<extra></extra>",
+            marker=dict(color=colores),
+        )
     )
-    fig.update_traces(
-        textposition="outside",
-        texttemplate="%{text:,}",
-        hovertemplate="%{customdata[0]}<br>Contratos: %{x:,}<extra></extra>",
+
+    # Estructura del Layout: Limpieza de ejes y ocultamiento de controles
+    fig.update_layout(
+        template="plotly_white",
+        margin=dict(l=20, r=40, t=20, b=20),
+        xaxis=dict(
+            visible=False,  # Oculta el eje X ya que las barras tienen etiquetas numéricas
+            range=[0, max_val * 1.20],  # Espacio para evitar corte de texto
+        ),
+        yaxis=dict(
+            autorange="reversed",
+            tickfont=dict(size=11, color="#2D3748"),
+            title=None,
+        ),
+        height=height or max(380, 34 * len(g) + 60),
     )
-    fig.update_xaxes(title="Contratos", range=[0, max_val * 1.18])
-    fig.update_yaxes(title=None, autorange="reversed", tickfont=dict(size=11))
-    return base_layout(fig, height=height or max(360, 32 * len(g) + 120))
+
+    return fig
 
 
+# --- 3. DISPOSICIÓN DE LAS COLUMNAS ---
 c5, c6 = st.columns(2)
+
 with c5:
-    st.markdown("#### Top 15 ordenadores del centro de costo")
-    st.caption("Columna G del Excel (ORDENADOR_CENTRO).")
+    st.markdown("#### Contratos Pendientes por Ordenador (Centro de Costo)")
+    st.caption(
+        "Top 15 áreas de ejecución directa con mayor volumen acumulado."
+    )
     if "ORDENADOR_CENTRO" not in f.columns:
-        st.warning("El Excel no trae la columna ORDENADOR_CENTRO (col. G).")
+        st.warning("Columna ORDENADOR_CENTRO no encontrada.")
     else:
         fig5 = fig_top_ordenadores(f["ORDENADOR_CENTRO"])
         if fig5 is None:
-            st.info("Sin datos de ordenadores del centro de costo bajo el filtro actual.")
+            st.info("Sin datos registrados para este filtro.")
         else:
-            st.plotly_chart(fig5, use_container_width=True)
+            st.plotly_chart(
+                fig5,
+                use_container_width=True,
+                config={"displayModeBar": False},
+            )
+
 with c6:
-    st.markdown("#### Top 15 ordenadores de la unidad superior")
-    st.caption("Columna H del Excel (ORDENADOR_UNIDAD).")
+    st.markdown("#### Contratos Pendientes por Ordenador (Unidad Superior)")
+    st.caption(
+        "Top 15 unidades de supervisión jerárquica con mayor volumen pendiente."
+    )
     if "ORDENADOR_UNIDAD" not in f.columns:
-        st.warning("El Excel no trae la columna ORDENADOR_UNIDAD (col. H).")
+        st.warning("Columna ORDENADOR_UNIDAD no encontrada.")
     else:
         fig6 = fig_top_ordenadores(f["ORDENADOR_UNIDAD"])
         if fig6 is None:
-            st.info("Sin datos de ordenadores de la unidad superior bajo el filtro actual.")
+            st.info("Sin datos registrados para este filtro.")
         else:
-            st.plotly_chart(fig6, use_container_width=True)
+            st.plotly_chart(
+                fig6,
+                use_container_width=True,
+                config={"displayModeBar": False},
+            )
+
+# --- 4. PIE DE PÁGINA EXPLICATIVO ---
+st.info(
+    "**Nota de gestión:** Las cifras presentadas reflejan el volumen de registros pendientes "
+    "de cierre/validación en el sistema. Los picos observados están asociados al volumen propio "
+    "de contratación de cada área. Se recomienda priorizar el acompañamiento técnico e instrumental "
+    "en las dependencias con mayor concentración."
+)
 
 # ----------------------------------------------------------------------------
 # Serie y subserie (misma logica de extraccion)

@@ -543,12 +543,7 @@ with s2:
             f'<span class="pill pill-pend">Pendientes: {fmt_num(pend)}</span>',
             unsafe_allow_html=True,
         )
-    st.info(
-        "Lectura rápida: si la barra está por debajo del 50 %, más de la mitad de los "
-        "contratos filtrados aún no tienen documentación en Alfresco. Usa el filtro "
-        "“Estado documental → No encontrado” para trabajar solo sobre ese grupo.",
-        icon="ℹ️",
-    )
+
 
 # ----------------------------------------------------------------------------
 # Analisis por año y estado
@@ -558,121 +553,462 @@ c3, c4 = st.columns(2)
 with c3:
     st.markdown("#### Contratos no encontrados por año")
     st.caption("Refleja el filtro actual. Para ver solo pendientes, filtra Estado documental → No encontrado.")
+        
     g3 = f.groupby("AÑO").size().reset_index(name="N").sort_values("AÑO")
-    fig3 = px.bar(g3, x="AÑO", y="N", text="N", template="plotly_white",
-                  color_discrete_sequence=[VERDE_SOLIDO])
-    fig3.update_traces(textposition="outside",
-                       hovertemplate="Año %{x}<br>Contratos: %{y:,}<extra></extra>")
-    fig3.update_xaxes(type="category", title="Año")
-    fig3.update_yaxes(title="Contratos")
+        
+        # 1. Crear gráfico de área/línea para darle mayor presencia visual
+    fig3 = px.line(
+            g3, 
+            x="AÑO", 
+            y="N", 
+            text="N", 
+            markers=True, 
+            template="plotly_white",
+            color_discrete_sequence=[VERDE_SOLIDO]
+        )
+        
+        # Formatear el texto a miles con separador (ej: 7,389 o 7.389)
+    fig3.update_traces(
+            texttemplate="%{text:,}",          # Formato con miles
+            textposition="top center",          # Posición encima del punto
+            textfont=dict(size=14, family="Arial Black", color="#1E293B"), # Números más grandes y legibles
+            marker=dict(size=10, symbol="circle"), # Puntos de la línea más grandes
+            hovertemplate="Año %{x}<br>Contratos faltantes: %{y:,}<extra></extra>"
+        )
+        
+        # 2. Ajustar rangos de los ejes para que el texto superior/inferior no se corte ni cruce
+    min_y = g3["N"].min() * 0.85
+    max_y = g3["N"].max() * 1.12
+        
+    fig3.update_xaxes(
+            type="category", 
+            title="Año de suscripción",
+            tickfont=dict(size=13)
+        )
+        
+    fig3.update_yaxes(
+            title="<b>Contratos faltantes</b>", # Título del eje más claro y explícito
+            range=[min_y, max_y],              # Margen suficiente para que las etiquetas no colisionen
+            showgrid=True,
+            gridcolor="#E2E8F0"
+        )
+        
     fig3 = base_layout(fig3)
     st.plotly_chart(fig3, use_container_width=True)
-with c4:
-    st.markdown("#### Por estado")
-    st.caption("Distribución del campo ESTADO original.")
-    g = f["ESTADO"].fillna("Sin estado").value_counts().reset_index()
-    g.columns = ["Estado", "N"]
-    g = g.sort_values("N", ascending=False)
-    fig = px.bar(g, x="Estado", y="N", text="N", template="plotly_white",
-                 color_discrete_sequence=[VERDE_SOLIDO])
-    fig.update_traces(textposition="outside",
-                      hovertemplate="%{x}<br>Contratos: %{y:,}<extra></extra>")
-    fig.update_layout(xaxis_tickangle=-20, xaxis_title="Estado", yaxis_title="Contratos")
-    fig = base_layout(fig)
-    st.plotly_chart(fig, use_container_width=True)
+
 
 # ----------------------------------------------------------------------------
 # Analisis por tipo de contrato
 # ----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# Analisis por tipo de contrato (tabla estructurada con catalogo de nombres)
+# ----------------------------------------------------------------------------
 st.markdown("## Análisis por tipo de contrato")
-st.caption("Tipos ordenados de mayor a menor cantidad.")
-g4 = f["TIPO"].fillna("Sin tipo").value_counts().reset_index()
-g4.columns = ["Tipo", "N"]
-g4 = g4.sort_values("N", ascending=True)  # ascendente para barra horizontal legible
-fig4 = px.bar(g4, x="N", y="Tipo", orientation="h", text="N", template="plotly_white",
-              color_discrete_sequence=[VERDE_SOLIDO])
-fig4.update_traces(textposition="outside",
-                   hovertemplate="Tipo %{y}<br>Contratos: %{x:,}<extra></extra>")
-fig4.update_xaxes(title="Contratos")
-fig4.update_yaxes(title="Tipo", type="category")
-fig4 = base_layout(fig4, height=max(320, 60 * len(g4) + 80))
-st.plotly_chart(fig4, use_container_width=True)
+st.caption("Estos contratos pertenecen a estos 8 tipos de modalidades contractuales ante los entes de control")
+
+
+@st.cache_data(show_spinner=False)
+def cargar_catalogo_tipos(data_dir):
+    """Lee el catálogo código -> nombre completo desde data/.
+
+    Prioridad: tipos_contrato.csv > tipos_contrato.xlsx > cualquier
+    *tipo*.csv/xlsx/txt. El .txt admite líneas 'CODIGO -> Nombre'.
+    Devuelve dict {codigo_str: nombre}.
+    """
+    import glob as _glob
+
+    dirs = []
+    for d in (data_dir, DEFAULT_DATA_DIR):
+        if d and os.path.isdir(d) and os.path.abspath(d) not in [os.path.abspath(x) for x in dirs]:
+            dirs.append(d)
+
+    patrones_csv = ["tipos_contrato.csv", "tipo_contrato.csv", "*tipo*.csv"]
+    patrones_xlsx = ["tipos_contrato.xlsx", "tipo_contrato.xlsx", "*tipo*.xlsx"]
+    patrones_txt = ["*tipo*.txt"]
+
+    def _normalizar(df):
+        df.columns = [str(c).strip().upper() for c in df.columns]
+        col_cod = next((c for c in ("TIPO", "CODIGO", "CÓDIGO", "CODE", "ID") if c in df.columns), None)
+        col_nom = next(
+            (c for c in ("NOMBRE", "NOMBRE_COMPLETO", "DESCRIPCION", "DESCRIPCIÓN", "TIPO_NOMBRE") if c in df.columns),
+            None,
+        )
+        if col_cod is None:
+            col_cod = df.columns[0]
+        if col_nom is None:
+            col_nom = df.columns[1] if len(df.columns) > 1 else df.columns[0]
+        out = {}
+        for _, row in df[[col_cod, col_nom]].dropna(how="all").iterrows():
+            cod = "" if pd.isna(row[col_cod]) else str(row[col_cod]).strip()
+            nom = "" if pd.isna(row[col_nom]) else str(row[col_nom]).strip()
+            if cod:
+                out[cod] = nom or cod
+        return out
+
+    for d in dirs:
+        for pat in patrones_csv:
+            for path in sorted(_glob.glob(os.path.join(d, pat))):
+                if os.path.basename(path).startswith("~$"):
+                    continue
+                try:
+                    for enc in ("utf-8-sig", "utf-8", "latin-1"):
+                        try:
+                            return _normalizar(pd.read_csv(path, dtype=str, encoding=enc))
+                        except UnicodeDecodeError:
+                            continue
+                except Exception:
+                    continue
+        for pat in patrones_xlsx:
+            for path in sorted(_glob.glob(os.path.join(d, pat))):
+                if os.path.basename(path).startswith("~$"):
+                    continue
+                try:
+                    return _normalizar(pd.read_excel(path, engine="openpyxl", dtype=str))
+                except Exception:
+                    continue
+        for pat in patrones_txt:
+            for path in sorted(_glob.glob(os.path.join(d, pat))):
+                try:
+                    with open(path, encoding="utf-8-sig") as fh:
+                        lineas = fh.read().splitlines()
+                except (OSError, UnicodeError):
+                    continue
+                out = {}
+                for ln in lineas:
+                    if "->" not in ln:
+                        continue
+                    cod, _, nom = ln.partition("->")
+                    cod, nom = cod.strip(), nom.strip()
+                    if cod and nom and re.search(r"\d", cod):
+                        out[cod] = nom
+                if out:
+                    return out
+    return {}
+
+
+catalogo_tipos = cargar_catalogo_tipos(DATA_DIR_ACTIVA)
+
+if "TIPO" in f.columns:
+    _tmp = f[["TIPO", "EN_ALFRESCO"]].copy()
+    _tmp["COD"] = _tmp["TIPO"].fillna("Sin tipo").astype("string").str.strip().replace("", "Sin tipo")
+else:
+    _tmp = pd.DataFrame({"COD": pd.Series(dtype=str), "EN_ALFRESCO": pd.Series(dtype=bool)})
+    _tmp["COD"] = "Sin tipo"
+
+_tmp["ESTADO_DOCUMENTAL"] = _tmp["EN_ALFRESCO"].map(lambda v: "Encontrado" if bool(v) else "No encontrado")
+cruce = pd.crosstab(_tmp["COD"], _tmp["ESTADO_DOCUMENTAL"])
+for _col in ("No encontrado", "Encontrado"):
+    if _col not in cruce.columns:
+        cruce[_col] = 0
+tabla_tipos = (
+    cruce[["No encontrado", "Encontrado"]]
+    .reset_index()
+    .rename(columns={"COD": "CODIGO", "No encontrado": "Contratos Faltantes", "Encontrado": "Contratos Encontrados"})
+)
+tabla_tipos["Contratos Faltantes"] = tabla_tipos["Contratos Faltantes"].fillna(0).astype(int)
+tabla_tipos["Contratos Encontrados"] = tabla_tipos["Contratos Encontrados"].fillna(0).astype(int)
+tabla_tipos["Total Contratos"] = tabla_tipos["Contratos Faltantes"] + tabla_tipos["Contratos Encontrados"]
+tabla_tipos["Tipo de Contrato"] = tabla_tipos["CODIGO"].map(
+    lambda c: f"{c} – {catalogo_tipos[c]}" if c in catalogo_tipos else str(c)
+)
+# 1) Ordenar SOLO las filas de detalle de mayor a menor por total.
+tabla_tipos = (
+    tabla_tipos[["Tipo de Contrato", "Contratos Faltantes", "Contratos Encontrados", "Total Contratos"]]
+    .sort_values("Total Contratos", ascending=False)
+    .reset_index(drop=True)
+)
+# 2) Calcular % de faltantes por tipo (0-100, sin division por cero).
+tabla_tipos["% Faltantes"] = (
+    tabla_tipos["Contratos Faltantes"] / tabla_tipos["Total Contratos"].replace(0, pd.NA)
+).fillna(0) * 100
+
+if tabla_tipos.empty:
+    st.info("Sin datos de tipos de contrato bajo el filtro actual.")
+else:
+    # 3) Concatenar la fila de resumen AL FINAL, despues de ordenar.
+    _tot_falt = int(tabla_tipos["Contratos Faltantes"].sum())
+    _tot_enc = int(tabla_tipos["Contratos Encontrados"].sum())
+    _tot = int(tabla_tipos["Total Contratos"].sum())
+    total_row = pd.DataFrame([{
+        "Tipo de Contrato": "Total general",
+        "Contratos Faltantes": _tot_falt,
+        "Contratos Encontrados": _tot_enc,
+        "Total Contratos": _tot,
+        "% Faltantes": (_tot_falt / _tot * 100) if _tot else 0.0,
+    }])
+    tabla_tipos = pd.concat([tabla_tipos, total_row], ignore_index=True)
+    st.dataframe(
+        tabla_tipos,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Tipo de Contrato": st.column_config.TextColumn("Tipo de Contrato", width="large"),
+            "Contratos Faltantes": st.column_config.NumberColumn("Contratos Faltantes", format="%d"),
+            "Contratos Encontrados": st.column_config.NumberColumn("Contratos Encontrados", format="%d"),
+            "Total Contratos": st.column_config.NumberColumn("Total Contratos", format="%d"),
+            "% Faltantes": st.column_config.ProgressColumn(
+                "% Faltantes", min_value=0, max_value=100, format="%.1f %%",
+                help="% de contratos faltantes (No encontrado) sobre el total del tipo.",
+            ),
+        },
+    )
 
 # ----------------------------------------------------------------------------
 # Centros de costo y ordenadores
 # ----------------------------------------------------------------------------
-st.markdown("## Centros de costo y ordenadores")
-st.caption("Barras horizontales ordenadas de mayor a menor. El valor se muestra al final de cada barra.")
+# ----------------------------------------------------------------------------
+# Centros de costo y ordenadores (col. G = ORDENADOR_CENTRO, col. H = ORDENADOR_UNIDAD)
+# ----------------------------------------------------------------------------
+import plotly.express as px
+import plotly.graph_objects as go
+import streamlit as st
 
+# Definición de colores estratégicos
+COLOR_NEUTRO = "#4A5568"  # Slate Gray / Azul grisáceo para la mayoría
+COLOR_ALERTA = "#E68656"  # Siena / Ámbar para resaltar el #1 (Outlier)
+
+# --- 1. SECCIÓN DE KPI CARDS (RESUMEN EJECUTIVO) ---
+st.markdown("## Monitoreo y Gestión de Pendientes por Ordenación de Gasto")
+st.caption(
+    "Volumen de contratos pendientes de regularización o verificación "
+    "distribuidos por área de responsabilidad."
+)
+
+if "ORDENADOR_CENTRO" in f.columns and "ORDENADOR_UNIDAD" in f.columns:
+    tot_centro = f["ORDENADOR_CENTRO"].dropna().count()
+    tot_unidad = f["ORDENADOR_UNIDAD"].dropna().count()
+    total_general = max(tot_centro, tot_unidad)
+
+    k1, k2, k3 = st.columns(3)
+    k1.metric(
+        label="Total Pendientes",
+        value=f"{total_general:,}",
+        help="Total de registros que requieren seguimiento.",
+    )
+    k2.metric(
+        label="Áreas Evaluadas",
+        value=f"{f['ORDENADOR_CENTRO'].nunique():,}",
+        help="Número total de centros de costo con registros.",
+    )
+    k3.metric(
+        label="Unidades de Supervisión",
+        value=f"{f['ORDENADOR_UNIDAD'].nunique():,}",
+        help="Número total de unidades superiores registradas.",
+    )
+
+st.write("---")
+
+
+# --- 2. FUNCIÓN MEJORADA PARA EL GRÁFICO ---
+def fig_top_ordenadores(serie, n=15, max_len=32, height=None):
+    """Barra horizontal Top-N con colorimetría condicional y limpieza visual."""
+    if serie is None:
+        return None
+
+    s = serie.dropna().astype("string").str.strip()
+    s = s[s != ""]
+    if s.empty:
+        return None
+
+    g = s.value_counts().head(n).reset_index()
+    g.columns = ["Nombre", "N"]
+    g = g.sort_values("N", ascending=False).reset_index(drop=True)
+
+    largos = g["Nombre"].str.len()
+    g["Etiqueta"] = g["Nombre"].str.slice(0, max_len)
+    g.loc[largos > max_len, "Etiqueta"] = (
+        g.loc[largos > max_len, "Etiqueta"] + "..."
+    )
+
+    # Colorimetría: la primera barra (#1) en ámbar/siena, el resto en gris neutro
+    colores = [COLOR_ALERTA] + [COLOR_NEUTRO] * (len(g) - 1)
+
+    max_val = int(g["N"].max())
+
+    fig = go.Figure(
+        go.Bar(
+            x=g["N"],
+            y=g["Etiqueta"],
+            orientation="h",
+            text=g["N"],
+            textposition="outside",
+            texttemplate="%{text:,}",
+            customdata=g["Nombre"],
+            hovertemplate="<b>%{customdata}</b><br>Pendientes: %{x:,}<extra></extra>",
+            marker=dict(color=colores),
+        )
+    )
+
+    # Estructura del Layout: Limpieza de ejes y ocultamiento de controles
+    fig.update_layout(
+        template="plotly_white",
+        margin=dict(l=20, r=40, t=20, b=20),
+        xaxis=dict(
+            visible=False,  # Oculta el eje X ya que las barras tienen etiquetas numéricas
+            range=[0, max_val * 1.20],  # Espacio para evitar corte de texto
+        ),
+        yaxis=dict(
+            autorange="reversed",
+            tickfont=dict(size=11, color="#2D3748"),
+            title=None,
+        ),
+        height=height or max(380, 34 * len(g) + 60),
+    )
+
+    return fig
+
+
+# --- 3. DISPOSICIÓN DE LAS COLUMNAS ---
 c5, c6 = st.columns(2)
+
 with c5:
-    st.markdown("#### Top 15 centros de costo")
-    g5 = f["CENTRO_COSTO"].fillna("Sin centro").value_counts().head(15).reset_index()
-    g5.columns = ["Centro", "N"]
-    g5 = g5.sort_values("N", ascending=True)
-    g5["Centro_corto"] = g5["Centro"].str.slice(0, 52)
-    fig5 = px.bar(g5, x="N", y="Centro_corto", orientation="h", text="N",
-                  template="plotly_white", color_discrete_sequence=[VERDE_SOLIDO],
-                  custom_data=["Centro"])
-    fig5.update_traces(textposition="outside",
-                       hovertemplate="%{customdata[0]}<br>Contratos: %{x:,}<extra></extra>")
-    fig5.update_xaxes(title="Contratos")
-    fig5.update_yaxes(title=None, tickfont=dict(size=11))
-    fig5 = base_layout(fig5, height=520)
-    fig5.update_layout(margin=dict(l=240, r=40, t=40, b=20))
-    st.plotly_chart(fig5, use_container_width=True)
+    st.markdown("#### Contratos Pendientes por Ordenador (Centro de Costo)")
+    st.caption(
+        "Top 15 áreas de ejecución directa con mayor volumen acumulado."
+    )
+    if "ORDENADOR_CENTRO" not in f.columns:
+        st.warning("Columna ORDENADOR_CENTRO no encontrada.")
+    else:
+        fig5 = fig_top_ordenadores(f["ORDENADOR_CENTRO"])
+        if fig5 is None:
+            st.info("Sin datos registrados para este filtro.")
+        else:
+            st.plotly_chart(
+                fig5,
+                use_container_width=True,
+                config={"displayModeBar": False},
+            )
+
 with c6:
-    st.markdown("#### Top 15 ordenadores")
-    ord_serie = pd.concat([f["ORDENADOR_CENTRO"], f["ORDENADOR_UNIDAD"]]).dropna()
-    ord_serie = ord_serie[ord_serie.str.strip() != ""]
-    g6 = ord_serie.value_counts().head(15).reset_index()
-    g6.columns = ["Ordenador", "N"]
-    g6 = g6.sort_values("N", ascending=True)
-    g6["Ordenador_corto"] = g6["Ordenador"].str.slice(0, 42)
-    fig6 = px.bar(g6, x="N", y="Ordenador_corto", orientation="h", text="N",
-                  template="plotly_white", color_discrete_sequence=[VERDE_SOLIDO],
-                  custom_data=["Ordenador"])
-    fig6.update_traces(textposition="outside",
-                       hovertemplate="%{customdata[0]}<br>Contratos: %{x:,}<extra></extra>")
-    fig6.update_xaxes(title="Contratos")
-    fig6.update_yaxes(title=None, tickfont=dict(size=11))
-    fig6 = base_layout(fig6, height=520)
-    fig6.update_layout(margin=dict(l=220, r=40, t=40, b=20))
-    st.plotly_chart(fig6, use_container_width=True)
+    st.markdown("#### Contratos Pendientes por Ordenador (Unidad Superior)")
+    st.caption(
+        "Top 15 unidades de supervisión jerárquica con mayor volumen pendiente."
+    )
+    if "ORDENADOR_UNIDAD" not in f.columns:
+        st.warning("Columna ORDENADOR_UNIDAD no encontrada.")
+    else:
+        fig6 = fig_top_ordenadores(f["ORDENADOR_UNIDAD"])
+        if fig6 is None:
+            st.info("Sin datos registrados para este filtro.")
+        else:
+            st.plotly_chart(
+                fig6,
+                use_container_width=True,
+                config={"displayModeBar": False},
+            )
+
+# --- 4. PIE DE PÁGINA EXPLICATIVO ---
+st.info(
+    "**Nota de gestión:** Las cifras presentadas reflejan el volumen de registros pendientes "
+    "de cierre/validación en el sistema. Los picos observados están asociados al volumen propio "
+    "de contratación de cada área. Se recomienda priorizar el acompañamiento técnico e instrumental "
+    "en las dependencias con mayor concentración."
+)
 
 # ----------------------------------------------------------------------------
 # Serie y subserie (misma logica de extraccion)
 # ----------------------------------------------------------------------------
-st.markdown("## Análisis por serie / subserie")
+import plotly.express as px
+import streamlit as st
+
+# Título principal del módulo
+st.markdown("## Resumen Ejecutivo: Distribución por Serie y Subserie Documental")
+
+# --- 1. MÉTRICAS / KPIS DIRECTIVOS ---
+total_registros = len(f)
+sin_serie_count = f["SERIE"].isna().sum() + (f["SERIE"] == "Sin serie").sum()
+pct_sin_serie = (
+    (sin_serie_count / total_registros) * 100 if total_registros > 0 else 0
+)
+
+m1, m2, m3 = st.columns(3)
+m1.metric("Total Contratos Analizados", f"{total_registros:,}")
+m2.metric(
+    label="Contratos Sin Clasificar (Sin Serie)",
+    value=f"{sin_serie_count:,}",
+    delta=f"⚠️ {pct_sin_serie:.1f}% del total",
+    delta_color="inverse",  # Alerta visual en rojo por brecha de clasificación
+)
+m3.metric(
+    "Series / Subseries Identificadas",
+    f"{f['SERIE'].replace('Sin serie', None).dropna().nunique()} / {f['SUBSERIE'].replace('Sin subserie', None).dropna().nunique()}",
+)
+
+st.divider()
+
+# --- 2. PREPARACIÓN DE DATOS (MUESTRA CLASIFICADA) ---
+df_series = f[f["SERIE"].notna() & (f["SERIE"] != "Sin serie")]
+df_subseries = f[f["SUBSERIE"].notna() & (f["SUBSERIE"] != "Sin subserie")]
+
 cc1, cc2 = st.columns(2)
+
+# --- 3. GRÁFICO POR SERIE ---
 with cc1:
-    st.markdown("#### Por serie")
-    gs = f["SERIE"].fillna("Sin serie").value_counts().head(20).reset_index()
+    st.markdown("#### Top Series Catalogadas")
+    gs = df_series["SERIE"].value_counts().head(10).reset_index()
     gs.columns = ["Serie", "N"]
-    gs = gs.sort_values("N", ascending=False)
-    fig_s = px.bar(gs, x="Serie", y="N", text="N", template="plotly_white",
-                   color_discrete_sequence=[VERDE_SOLIDO])
-    fig_s.update_traces(textposition="outside",
-                        hovertemplate="Serie %{x}<br>Contratos: %{y:,}<extra></extra>")
-    fig_s.update_xaxes(type="category", title="Serie")
-    fig_s.update_yaxes(title="Contratos")
+    gs = gs.sort_values("N", ascending=True)  # Orden para barra horizontal
+
+    fig_s = px.bar(
+        gs,
+        x="N",
+        y="Serie",
+        orientation="h",
+        text="N",
+        template="plotly_white",
+        color_discrete_sequence=[VERDE_SOLIDO],
+    )
+
+    # Formateo de texto en la barra y etiqueta flotante
+    fig_s.update_traces(
+        textposition="outside",
+        texttemplate="%{x:,}",  # Formato con separadores de miles
+        hovertemplate="<b>Serie:</b> %{y}<br><b>Contratos:</b> %{x:,}<extra></extra>",
+    )
+
+    # Margen extra a la derecha (18%) para evitar que los números se recorten en el borde
+    max_val_s = gs["N"].max() if not gs.empty else 1
+    fig_s.update_xaxes(visible=False, range=[0, max_val_s * 1.18])
+    fig_s.update_yaxes(title_text="", type="category")
+
     fig_s = base_layout(fig_s)
+    fig_s.update_layout(margin=dict(r=40, l=10, t=10, b=10))
     st.plotly_chart(fig_s, use_container_width=True)
+
+# --- 4. GRÁFICO POR SUBSERIE ---
 with cc2:
-    st.markdown("#### Por subserie")
-    gss = f["SUBSERIE"].fillna("Sin subserie").value_counts().head(20).reset_index()
+    st.markdown("#### Top 10 Subseries Catalogadas")
+    gss = df_subseries["SUBSERIE"].value_counts().head(10).reset_index()
     gss.columns = ["Subserie", "N"]
-    gss = gss.sort_values("N", ascending=False)
-    fig_ss = px.bar(gss, x="Subserie", y="N", text="N", template="plotly_white",
-                    color_discrete_sequence=[VERDE_SOLIDO])
-    fig_ss.update_traces(textposition="outside",
-                         hovertemplate="Subserie %{x}<br>Contratos: %{y:,}<extra></extra>")
-    fig_ss.update_layout(xaxis_tickangle=-25)
-    fig_ss.update_xaxes(type="category", title="Subserie")
-    fig_ss.update_yaxes(title="Contratos")
+    gss = gss.sort_values("N", ascending=True)
+
+    fig_ss = px.bar(
+        gss,
+        x="N",
+        y="Subserie",
+        orientation="h",
+        text="N",
+        template="plotly_white",
+        color_discrete_sequence=[VERDE_SOLIDO],
+    )
+
+    # Formateo de texto en la barra y etiqueta flotante
+    fig_ss.update_traces(
+        textposition="outside",
+        texttemplate="%{x:,}",
+        hovertemplate="<b>Subserie:</b> %{y}<br><b>Contratos:</b> %{x:,}<extra></extra>",
+    )
+
+    # Margen extra a la derecha (18%) para evitar recorte
+    max_val_ss = gss["N"].max() if not gss.empty else 1
+    fig_ss.update_xaxes(visible=False, range=[0, max_val_ss * 1.18])
+    fig_ss.update_yaxes(title_text="", type="category")
+
     fig_ss = base_layout(fig_ss)
+    fig_ss.update_layout(margin=dict(r=40, l=10, t=10, b=10))
     st.plotly_chart(fig_ss, use_container_width=True)
-st.caption("Serie se extrae con regex `C\\d+` sobre SERIE_RUTA (ej: `1112_C09.23_...` → **C09**). Subserie con `C\\d+.\\d+` (→ **C09.23**). Así funciona también con rutas de doble prefijo como `2123_6540_C09.11_...`.")
+
+
 
 # ----------------------------------------------------------------------------
 # Tabla de detalle (seccion operativa principal)
@@ -686,8 +1022,8 @@ f["ESTADO_DOCUMENTAL"] = f["EN_ALFRESCO"].map(lambda v: "Encontrado" if bool(v) 
 
 cols_pref = ["AÑO", "CONTRATO", "TIPO", "CENTRO_COSTO", "NOMBRE_CONTRATISTA",
              "ORDENADOR_CENTRO", "ORDENADOR_UNIDAD", "ESTADO_DOCUMENTAL",
-             "SERIE", "SUBSERIE", "SERIE_RUTA", "ESTADO", "CARPETA_ALFRESCO",
-             "URL_ALFRESCO_1CLIC", "VALIDACION"]
+             "SERIE", "SUBSERIE", "SERIE_RUTA", "CARPETA_ALFRESCO",
+             "URL_ALFRESCO_1CLIC"]
 cols_show = [c for c in cols_pref if c in f.columns]
 tabla = f[cols_show].copy()
 

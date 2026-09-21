@@ -1,0 +1,9 @@
+tipo de contrato -> nombre 
+18 -> Orden de Prestación de Servicios
+19 -> Orden de Trabajo
+20 -> Orden de Compra
+49 -> Documento de Importación
+270 -> Registro Contractual de Contratos
+298 -> Contrato de Suministro de Bienes
+374 -> Orden de Prestación de Servicios Importación
+450 -> Orden de Consultoría

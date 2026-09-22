@@ -7,9 +7,11 @@ Por defecto se usa data/ junto a app.py. El año se detecta desde el nombre del
 archivo (ej: 2025_ENLACES_ALFRESCO.xlsx).
 """
 import glob
+import io
 import os
 import re
 import sys
+from datetime import datetime
 
 import pandas as pd
 import streamlit as st
@@ -160,6 +162,77 @@ def extraer_anio_fila(valor):
     return m.group(0) if m else None
 
 
+# Columnas que el dashboard sabe aprovechar (todas opcionales salvo
+# CONTRATO/NUMERO para inferir año; el resto se tolera con guards).
+COLUMNAS_ESPERADAS = [
+    "CONTRATO", "NUMERO", "TIPO", "CENTRO_COSTO", "NOMBRE_CONTRATISTA",
+    "OBJETO_CONTRATO", "ORDENADOR_CENTRO", "ORDENADOR_UNIDAD",
+    "CARPETA_ALFRESCO", "URL_ALFRESCO_1CLIC", "SERIE_RUTA",
+    "ESTADO", "ESTADO_FINAL",
+]
+
+
+def normalizar_frame(df_raw, nombre_archivo):
+    """Aplica a UN dataframe la misma normalización que usaba cargar_datos.
+
+    - Columnas a MAYÚSCULAS sin espacios.
+    - Columna AÑO: respeta AÑO/ANO válido, si no infiere de CONTRATO/NUMERO,
+      si no usa el año del nombre de archivo.
+    - Columna ARCHIVO con el nombre de origen.
+    No toca SERIE/SUBSERIE/EN_ALFRESCO (eso lo hace finalizar_consolidado).
+    """
+    df = df_raw.copy()
+    df.columns = [str(c).strip().upper() for c in df.columns]
+    anio_defecto = detectar_anio(nombre_archivo)
+    if "AÑO" in df.columns or "ANO" in df.columns:
+        col_orig = "AÑO" if "AÑO" in df.columns else "ANO"
+        base = df[col_orig].astype("string").str.strip()
+        valida = base.str.fullmatch(r"(?:19|20)\d{2}", na=False)
+        df["AÑO"] = base.where(valida)
+    else:
+        df["AÑO"] = pd.NA
+    faltan = df["AÑO"].isna()
+    if faltan.any():
+        for col_fuente in ("CONTRATO", "NUMERO"):
+            if col_fuente in df.columns and faltan.any():
+                inferido = df.loc[faltan, col_fuente].map(extraer_anio_fila)
+                df.loc[faltan, "AÑO"] = inferido
+                faltan = df["AÑO"].isna()
+            if not faltan.any():
+                break
+    df["AÑO"] = df["AÑO"].fillna(anio_defecto if anio_defecto else "Sin año")
+    df["ARCHIVO"] = os.path.basename(nombre_archivo)
+    return df
+
+
+def finalizar_consolidado(frames):
+    """Concatena frames ya normalizados y deriva SERIE/SUBSERIE/EN_ALFRESCO.
+
+    Lógica idéntica a la original: prioriza ESTADO_FINAL, con fallback a ESTADO.
+    """
+    if not frames:
+        return pd.DataFrame()
+    full = pd.concat(frames, ignore_index=True)
+    for c in full.columns:
+        if full[c].dtype == object:
+            full[c] = full[c].astype("string").str.strip()
+    full["SERIE"] = full["SERIE_RUTA"].apply(extraer_serie) if "SERIE_RUTA" in full.columns else "Sin serie"
+    full["SUBSERIE"] = full["SERIE_RUTA"].apply(extraer_subserie) if "SERIE_RUTA" in full.columns else "Sin subserie"
+    if "ESTADO_FINAL" in full.columns:
+        full["EN_ALFRESCO"] = (
+            full["ESTADO_FINAL"].astype("string").str.strip().str.upper() == ESTADO_FINAL_OK
+        ).fillna(False).astype(bool)
+    elif "ESTADO" in full.columns:
+        full["EN_ALFRESCO"] = (
+            full["ESTADO"].astype("string").str.strip() == ESTADO_OK
+        ).fillna(False).astype(bool)
+    else:
+        full["EN_ALFRESCO"] = False
+    full["ORDENADOR_CENTRO"] = full.get("ORDENADOR_CENTRO")
+    full["ORDENADOR_UNIDAD"] = full.get("ORDENADOR_UNIDAD")
+    return full
+
+
 @st.cache_data(show_spinner="Cargando Excels...")
 def cargar_datos(data_dir):
     # Solo se lee la carpeta elegida. Si está vacía y es la carpeta por defecto,
@@ -177,58 +250,28 @@ def cargar_datos(data_dir):
     origen = []
     for path in archivos:
         try:
-            df = pd.read_excel(path, engine="openpyxl", dtype=str)
+            df_raw = pd.read_excel(path, engine="openpyxl", dtype=str)
         except Exception as e:
             st.warning(f"No se pudo leer {os.path.basename(path)}: {e}")
             continue
-        df.columns = [str(c).strip().upper() for c in df.columns]
-        anio_defecto = detectar_anio(path)  # un año, o None si consolidado/sin año
-        # 1) Si el Excel ya trae columna AÑO/ANO con años válidos, respetarla.
-        if "AÑO" in df.columns or "ANO" in df.columns:
-            col_orig = "AÑO" if "AÑO" in df.columns else "ANO"
-            base = df[col_orig].astype("string").str.strip()
-            valida = base.str.fullmatch(r"(?:19|20)\d{2}", na=False)
-            df["AÑO"] = base.where(valida)
-        else:
-            df["AÑO"] = pd.NA
-        # 2) Completar faltantes fila por fila: CONTRATO -> NUMERO -> año archivo.
-        faltan = df["AÑO"].isna()
-        if faltan.any():
-            for col_fuente in ("CONTRATO", "NUMERO"):
-                if col_fuente in df.columns and faltan.any():
-                    inferido = df.loc[faltan, col_fuente].map(extraer_anio_fila)
-                    df.loc[faltan, "AÑO"] = inferido
-                    faltan = df["AÑO"].isna()
-                if not faltan.any():
-                    break
-        # 3) Último recurso: año del nombre de archivo, o "Sin año".
-        df["AÑO"] = df["AÑO"].fillna(anio_defecto if anio_defecto else "Sin año")
-        df["ARCHIVO"] = os.path.basename(path)
-        frames.append(df)
+        frames.append(normalizar_frame(df_raw, path))
         origen.append(os.path.basename(path))
     if not frames:
         return pd.DataFrame(), []
-    full = pd.concat(frames, ignore_index=True)
-    # Normalizar nulos / espacios
-    for c in full.columns:
-        if full[c].dtype == object:
-            full[c] = full[c].astype("string").str.strip()
-    full["SERIE"] = full["SERIE_RUTA"].apply(extraer_serie) if "SERIE_RUTA" in full.columns else "Sin serie"
-    full["SUBSERIE"] = full["SERIE_RUTA"].apply(extraer_subserie) if "SERIE_RUTA" in full.columns else "Sin subserie"
-    if "ESTADO_FINAL" in full.columns:
-        full["EN_ALFRESCO"] = (
-            full["ESTADO_FINAL"].astype("string").str.strip().str.upper() == ESTADO_FINAL_OK
-        ).fillna(False).astype(bool)
-    elif "ESTADO" in full.columns:
-        full["EN_ALFRESCO"] = (
-            full["ESTADO"].astype("string").str.strip() == ESTADO_OK
-        ).fillna(False).astype(bool)
-    else:
-        full["EN_ALFRESCO"] = False
-    # Ordenador combinado para facilitar busqueda (mantiene columnas originales)
-    full["ORDENADOR_CENTRO"] = full.get("ORDENADOR_CENTRO")
-    full["ORDENADOR_UNIDAD"] = full.get("ORDENADOR_UNIDAD")
-    return full, sorted(origen)
+    return finalizar_consolidado(frames), sorted(origen)
+
+
+@st.cache_data(show_spinner="Procesando Excel cargado...")
+def cargar_excel_subido(file_bytes, nombre_archivo):
+    """Procesa en memoria el .xlsx subido con st.file_uploader.
+
+    Usa exactamente la misma normalización que los archivos locales
+    (normalizar_frame + finalizar_consolidado). Los bytes son la clave
+    de caché, por lo que el archivo persiste al interactuar con filtros.
+    """
+    df_raw = pd.read_excel(io.BytesIO(file_bytes), engine="openpyxl", dtype=str)
+    frames = [normalizar_frame(df_raw, nombre_archivo)]
+    return finalizar_consolidado(frames)
 
 
 # ----------------------------------------------------------------------------
@@ -337,8 +380,102 @@ def contar_xlsx(ruta):
         return 0
 
 
+# ----------------------------------------------------------------------------
+# Encabezado (la fuente tecnica no domina visualmente)
+# ----------------------------------------------------------------------------
+st.markdown("# Gestión Documental de Contratos en Alfresco")
+st.markdown(
+    '<p class="subtitulo">Monitoreo de la disponibilidad y estado de los contratos en Alfresco.'
+    "</p>",
+    unsafe_allow_html=True,
+)
+
+# ----------------------------------------------------------------------------
+# Cargar archivo de datos (fuente prioritaria; no altera lógica posterior)
+# Flujo: abrir URL -> cargar Excel -> validación -> lectura pandas ->
+# mismo procesamiento (normalizar_frame + finalizar_consolidado) -> dashboard.
+# Funciona en Streamlit Community Cloud: todo en memoria/sesión, sin rutas.
+# ----------------------------------------------------------------------------
+st.markdown("## Cargar archivo de datos")
+archivo_subido = st.file_uploader(
+    "📂 Seleccionar archivo Excel",
+    type=["xlsx"],
+    key="excel_upload",
+    help="Seleccione el Excel de enlaces Alfresco (.xlsx). Se procesa en memoria con el mismo formato que el archivo local.",
+)
+FUENTE_SUBIDA = archivo_subido is not None
+df = pd.DataFrame()
+archivos = []
 DATA_DIR_ACTIVA = st.session_state.data_dir
-df, archivos = cargar_datos(DATA_DIR_ACTIVA)
+info_carga = st.session_state.get("upload_info")
+
+if FUENTE_SUBIDA:
+    nombre_subido = archivo_subido.name or "archivo.xlsx"
+    if not nombre_subido.lower().endswith(".xlsx"):
+        st.error("El archivo debe ser un Excel (.xlsx). Seleccione un archivo válido.")
+        st.stop()
+    try:
+        file_bytes = archivo_subido.getvalue()
+    except Exception:
+        st.error("No se pudo leer el archivo cargado. Intente de nuevo.")
+        st.stop()
+    if not file_bytes:
+        st.error("El archivo cargado está vacío. Seleccione un Excel válido.")
+        st.stop()
+    try:
+        peek = pd.read_excel(io.BytesIO(file_bytes), engine="openpyxl", dtype=str, nrows=0)
+        cols_subido = [str(c).strip().upper() for c in peek.columns]
+    except Exception:
+        st.error("No se pudo leer el archivo como Excel (.xlsx). Verifique que no esté dañado ni protegido.")
+        st.stop()
+    if not cols_subido:
+        st.error("El archivo no tiene columnas. Verifique la estructura del Excel.")
+        st.stop()
+    faltantes = [c for c in COLUMNAS_ESPERADAS if c not in cols_subido]
+    if "CONTRATO" not in cols_subido and "NUMERO" not in cols_subido:
+        st.error(
+            "Estructura inválida: el Excel debe contener al menos la columna CONTRATO o NUMERO. "
+            f"Faltan: {', '.join(faltantes) if faltantes else 'columnas clave'}."
+        )
+        st.stop()
+    if faltantes:
+        st.warning(
+            "El archivo no trae estas columnas esperadas y esas vistas/filtros mostrarán menos detalle: "
+            + ", ".join(faltantes) + "."
+        )
+    if "ESTADO" not in cols_subido and "ESTADO_FINAL" not in cols_subido:
+        st.warning("El archivo no trae ESTADO ni ESTADO_FINAL: todo se marcará como “No encontrado”.")
+    try:
+        df = cargar_excel_subido(file_bytes, nombre_subido)
+    except Exception:
+        st.error("No se pudo procesar el archivo. Verifique que sea un .xlsx válido con datos.")
+        st.stop()
+    if df.empty:
+        st.error("El archivo cargado no tiene registros para mostrar.")
+        st.stop()
+    archivos = [nombre_subido]
+    DATA_DIR_ACTIVA = f"Archivo cargado: {nombre_subido}"
+    tam = getattr(archivo_subido, "size", len(file_bytes))
+    firma = (nombre_subido, tam, len(df))
+    if st.session_state.get("upload_firma") != firma:
+        st.session_state["upload_firma"] = firma
+        st.session_state["upload_info"] = {
+            "nombre": nombre_subido,
+            "registros": int(len(df)),
+            "fecha": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        }
+    info_carga = st.session_state.get("upload_info")
+    st.success("✓ Archivo cargado correctamente")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.caption(f"Archivo: {info_carga['nombre']}" if info_carga else f"Archivo: {nombre_subido}")
+    with c2:
+        st.caption(f"Registros procesados: {fmt_num(len(df))}")
+    with c3:
+        st.caption(f"Procesado: {info_carga['fecha']}" if info_carga and info_carga.get("fecha") else "Procesado: ahora")
+else:
+    DATA_DIR_ACTIVA = st.session_state.data_dir
+    df, archivos = cargar_datos(DATA_DIR_ACTIVA)
 
 with st.sidebar:
     st.markdown("### Seguimiento documental")
@@ -375,6 +512,8 @@ with st.sidebar:
         placeholder="Ej: 2025000022, contratista o palabra del objeto…",
     )
     with st.expander("⚙️ Configuración de datos", expanded=False):
+        if FUENTE_SUBIDA:
+            st.info("Hay un archivo cargado desde “Cargar archivo de datos” y tiene prioridad. Para volver a la carpeta local, quite el archivo (X en el cargador).")
         nueva_ruta = st.text_input(
             "Ruta con los Excel",
             value=st.session_state.data_dir,
@@ -449,22 +588,11 @@ with st.sidebar:
                 if len(subdirs) > 100:
                     st.caption("…mostrando las 100 primeras. Usa el campo de ruta para ir directo.")
 
-# ----------------------------------------------------------------------------
-# Encabezado (la fuente tecnica no domina visualmente)
-# ----------------------------------------------------------------------------
-st.markdown("# Gestión Documental de Contratos en Alfresco")
-st.markdown(
-    '<p class="subtitulo">Monitoreo de la disponibilidad y estado de los contratos en Alfresco.'
-    "</p>",
-    unsafe_allow_html=True,
-)
-
 if df.empty:
-    st.error(
-        f"No se encontraron archivos .xlsx en:\n\n`{DATA_DIR_ACTIVA}`\n\n"
-        "Copia ahí 2024_ENLACES_ALFRESCO.xlsx, 2025_ENLACES_ALFRESCO.xlsx y "
-        "2026_ENLACES_ALFRESCO.xlsx (mismo formato de columnas), o elige otra carpeta en "
-        "la barra lateral → ⚙️ Configuración de datos."
+    st.info("Cargue el archivo Excel para generar el dashboard.")
+    st.caption(
+        "Use la sección “Cargar archivo de datos” (.xlsx). "
+        "También puede usar la carpeta local en la barra lateral → ⚙️ Configuración de datos."
     )
     st.stop()
 

@@ -32,7 +32,7 @@ PALETA = {
     "primario": "#1B5E20",
     "primario_suave": "#E8F2EA",
     "en_alfresco": "#1B7A3D",
-    "pendiente": "#B42309",
+    "pendiente": "#F9573B",
     "pendiente_suave": "#FBEEDC",
 }
 
@@ -106,28 +106,30 @@ VERDES_CONTINUO = ["#edf8e9", "#c7e9c0", "#a1d99b", "#74c476", "#41ab5d", "#238b
 
 RE_ANIO = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
 RE_ANIO_FILA = re.compile(r"(?:19|20)\d{2}")
-RE_SERIE = re.compile(r"(C\d+)")
-RE_SUBSERIE = re.compile(r"(C\d+\.\d+)")
+RE_SERIE = re.compile(r"([A-Z]+\d+)", re.IGNORECASE)
+RE_SUBSERIE = re.compile(r"([A-Z]+\d+\.\d+)", re.IGNORECASE)
 
 
 def extraer_serie(ruta):
-    """Serie = secuencia Cxx dentro de SERIE_RUTA. Ej: 1112_C09.23_... -> C09.
+    """Serie = codigo LETRAS+digitos dentro de SERIE_RUTA. Ej: 1112_C09.23_... -> C09,
+    4112_P11.02_... -> P11.
 
-    Se usa regex C\\d+ porque la definicion literal 'despues del primer _ y antes
+    Se usa regex [A-Z]+\\d+ porque la definicion literal 'despues del primer _ y antes
     del punto' falla en rutas con doble prefijo como 2123_6540_C09.11_... (daria
-    '6540_C09'). El regex devuelve siempre C09 / C270 etc.
+    '6540_C09'). El regex devuelve siempre C09 / P11 / C270 etc. Exige letras
+    iniciales para no capturar los prefijos numericos de dependencia (4112, 1112).
     """
     if not isinstance(ruta, str) or not ruta.strip():
         return "Sin serie"
     m = RE_SERIE.search(ruta)
-    return m.group(1) if m else "Sin serie"
+    return m.group(1).upper() if m else "Sin serie"
 
 
 def extraer_subserie(ruta):
     if not isinstance(ruta, str) or not ruta.strip():
         return "Sin subserie"
     m = RE_SUBSERIE.search(ruta)
-    return m.group(1) if m else extraer_serie(ruta)
+    return m.group(1).upper() if m else extraer_serie(ruta)
 
 
 def detectar_anio(path):
@@ -256,6 +258,42 @@ def base_layout(fig, height=380):
         plot_bgcolor="white",
     )
     return fig
+
+
+# ----------------------------------------------------------------------------
+# Semaforo por % de faltantes (verde <50, amarillo 50-70, rojo >70)
+# ----------------------------------------------------------------------------
+SEMAFORO = {
+    "verde": "#43A047",
+    "amarillo": "#EAB308",
+    "rojo": "#E22200",
+}
+
+
+def color_semaforo(pct):
+    """Devuelve el color semaforo segun % de faltantes (0-100)."""
+    try:
+        v = float(pct)
+    except (TypeError, ValueError):
+        return SEMAFORO["verde"]
+    if v > 70:
+        return SEMAFORO["rojo"]
+    if v >= 50:
+        return SEMAFORO["amarillo"]
+    return SEMAFORO["verde"]
+
+
+def nivel_semaforo(pct):
+    """Etiqueta corta del nivel: 🟢 / 🟡 / 🔴."""
+    try:
+        v = float(pct)
+    except (TypeError, ValueError):
+        return "🟢 Bajo"
+    if v > 70:
+        return "🔴 Crítico (>70%)"
+    if v >= 50:
+        return "🟡 Medio (50-70%)"
+    return "🟢 Bajo (<50%)"
 
 
 # ----------------------------------------------------------------------------
@@ -513,7 +551,7 @@ with s1:
     fig2 = px.pie(
         g2, names="Situación", values="N", hole=0.55,
         color="Situación",
-        color_discrete_map={"En Alfresco": PALETA["en_alfresco"], "Pendientes": "#E41805"},
+        color_discrete_map={"En Alfresco": PALETA["en_alfresco"], "Pendientes": "#F9573B"},
         template="plotly_white",
     )
     fig2.update_traces(textinfo="value", textfont_size=13,
@@ -549,52 +587,105 @@ with s2:
 # Analisis por año y estado
 # ----------------------------------------------------------------------------
 st.markdown("## Análisis por año y estado")
+st.caption("Gráfico compuesto por año: contratos encontrados en Alfresco vs. faltantes (pendientes). La línea superior indica el total del año. "
+           "🟢 <50% faltantes · 🟡 50-70% · 🔴 >70%.")
+import plotly.graph_objects as go
+
+g_year = f.groupby(["AÑO", "EN_ALFRESCO"]).size().reset_index(name="N")
+pivot = g_year.pivot(index="AÑO", columns="EN_ALFRESCO", values="N").fillna(0)
+for _col in (False, True):
+    if _col not in pivot.columns:
+        pivot[_col] = 0
+pivot = pivot.reset_index().sort_values("AÑO")
+pivot["Faltantes"] = pivot[False].astype(int)
+pivot["Encontrados"] = pivot[True].astype(int)
+pivot["Total"] = pivot["Faltantes"] + pivot["Encontrados"]
+pivot["% Faltantes"] = (pivot["Faltantes"] / pivot["Total"].replace(0, pd.NA)).fillna(0) * 100
+pivot["ColorFalt"] = pivot["% Faltantes"].map(color_semaforo)
+pivot["Nivel"] = pivot["% Faltantes"].map(nivel_semaforo)
+
 c3, c4 = st.columns(2)
 with c3:
-    st.markdown("#### Contratos no encontrados por año")
-    st.caption("Refleja el filtro actual. Para ver solo pendientes, filtra Estado documental → No encontrado.")
-        
-    g3 = f.groupby("AÑO").size().reset_index(name="N").sort_values("AÑO")
-        
-        # 1. Crear gráfico de área/línea para darle mayor presencia visual
-    fig3 = px.line(
-            g3, 
-            x="AÑO", 
-            y="N", 
-            text="N", 
-            markers=True, 
-            template="plotly_white",
-            color_discrete_sequence=[VERDE_SOLIDO]
-        )
-        
-        # Formatear el texto a miles con separador (ej: 7,389 o 7.389)
-    fig3.update_traces(
-            texttemplate="%{text:,}",          # Formato con miles
-            textposition="top center",          # Posición encima del punto
-            textfont=dict(size=14, family="Arial Black", color="#1E293B"), # Números más grandes y legibles
-            marker=dict(size=10, symbol="circle"), # Puntos de la línea más grandes
-            hovertemplate="Año %{x}<br>Contratos faltantes: %{y:,}<extra></extra>"
-        )
-        
-        # 2. Ajustar rangos de los ejes para que el texto superior/inferior no se corte ni cruce
-    min_y = g3["N"].min() * 0.85
-    max_y = g3["N"].max() * 1.12
-        
-    fig3.update_xaxes(
-            type="category", 
-            title="Año de suscripción",
-            tickfont=dict(size=13)
-        )
-        
-    fig3.update_yaxes(
-            title="<b>Contratos faltantes</b>", # Título del eje más claro y explícito
-            range=[min_y, max_y],              # Margen suficiente para que las etiquetas no colisionen
-            showgrid=True,
-            gridcolor="#E2E8F0"
-        )
-        
+    st.markdown("#### Total de contratos por año (compuesto)")
+    fig3 = go.Figure()
+    fig3.add_trace(go.Bar(
+        x=pivot["AÑO"].astype(str),
+        y=pivot["Encontrados"],
+        name="En Alfresco",
+        marker_color=PALETA["en_alfresco"],
+        text=pivot["Encontrados"],
+        textposition="inside",
+        insidetextanchor="middle",
+        texttemplate="%{text:,}",
+        textfont=dict(size=11, color="white"),
+        hovertemplate="Año %{x}<br>En Alfresco: %{y:,}<extra></extra>",
+    ))
+    fig3.add_trace(go.Bar(
+        x=pivot["AÑO"].astype(str),
+        y=pivot["Faltantes"],
+        name="Faltantes (🟢<50% 🟡50-70% 🔴>70%)",
+        marker_color=pivot["ColorFalt"].tolist(),
+        text=pivot["Faltantes"],
+        textposition="inside",
+        insidetextanchor="middle",
+        texttemplate="%{text:,}",
+        textfont=dict(size=11, color="white"),
+        customdata=pivot[["% Faltantes", "Nivel"]].to_numpy(),
+        hovertemplate="Año %{x}<br>Faltantes: %{y:,} (%{customdata[0]:.1f} %)<br>%{customdata[1]}<extra></extra>",
+    ))
+    _ymax = float(pivot["Total"].max()) if len(pivot) else 1
+    _etiqueta_y = (pivot["Total"] + _ymax * 0.06).tolist()
+    fig3.add_trace(go.Scatter(
+        x=pivot["AÑO"].astype(str),
+        y=pivot["Total"],
+        name="Total",
+        mode="lines+markers",
+        line=dict(color=PALETA["texto"], width=2.5),
+        marker=dict(size=9, color=PALETA["texto"]),
+        hovertemplate="Año %{x}<br>Total: %{y:,}<extra></extra>",
+    ))
+    fig3.add_trace(go.Scatter(
+        x=pivot["AÑO"].astype(str),
+        y=_etiqueta_y,
+        name="Total (etiqueta)",
+        mode="text",
+        text=[f"Total: {int(v):,}" for v in pivot["Total"]],
+        textposition="top center",
+        textfont=dict(size=11, color=PALETA["texto"]),
+        hoverinfo="skip",
+        showlegend=False,
+    ))
+    fig3.update_layout(barmode="stack", template="plotly_white",
+                       margin=dict(l=20, r=20, t=60, b=70),
+                       legend=dict(orientation="h", yanchor="top", y=-0.22, xanchor="center", x=0.5))
+    fig3.update_xaxes(type="category", title="Año de suscripción", tickfont=dict(size=13))
+    fig3.update_yaxes(title="Número de contratos", showgrid=True, gridcolor="#E2E8F0",
+                      range=[0, _ymax * 1.22])
     fig3 = base_layout(fig3)
+    fig3.update_layout(margin=dict(l=20, r=20, t=60, b=80),
+                       legend=dict(orientation="h", yanchor="top", y=-0.22, xanchor="center", x=0.5))
+    fig3.update_yaxes(range=[0, _ymax * 1.22])
     st.plotly_chart(fig3, use_container_width=True)
+
+with c4:
+    st.markdown("#### Faltantes por año (detalle)")
+    pivot["% en Alfresco"] = (pivot["Encontrados"] / pivot["Total"].replace(0, pd.NA)).fillna(0) * 100
+    fig4 = go.Figure()
+    fig4.add_trace(go.Bar(
+        x=pivot["AÑO"].astype(str),
+        y=pivot["Faltantes"],
+        name="Faltantes",
+        marker_color=pivot["ColorFalt"].tolist(),
+        text=[f"{n:,} ({p:.1f} %)" for n, p in zip(pivot["Faltantes"], pivot["% Faltantes"])],
+        textposition="outside",
+        customdata=pivot[["Total", "% Faltantes", "Nivel"]].to_numpy(),
+        hovertemplate="Año %{x}<br>Faltantes: %{y:,} (%{customdata[1]:.1f} %)<br>Total año: %{customdata[0]:,}<br>%{customdata[2]}<extra></extra>",
+    ))
+    fig4.update_layout(template="plotly_white", showlegend=False)
+    fig4.update_xaxes(type="category", title="Año de suscripción", tickfont=dict(size=13))
+    fig4.update_yaxes(title="Contratos faltantes", showgrid=True, gridcolor="#E2E8F0")
+    fig4 = base_layout(fig4)
+    st.plotly_chart(fig4, use_container_width=True)
 
 
 # ----------------------------------------------------------------------------
@@ -737,8 +828,22 @@ else:
         "% Faltantes": (_tot_falt / _tot * 100) if _tot else 0.0,
     }])
     tabla_tipos = pd.concat([tabla_tipos, total_row], ignore_index=True)
+
+    def _estilo_pct(v):
+        try:
+            x = float(v)
+        except (TypeError, ValueError):
+            return ""
+        s = nivel_semaforo(x)
+        if s.startswith("🔴"):
+            return "background-color: #FDECEA; color: #7F1D1D; font-weight: 600;"
+        if s.startswith("🟡"):
+            return "background-color: #FEF9C3; color: #713F12; font-weight: 600;"
+        return "background-color: #DCFCE7; color: #14532D; font-weight: 600;"
+
+    st.caption("Semáforo por % faltantes: 🟢 Bajo (<50%) · 🟡 Medio (50-70%) · 🔴 Crítico (>70%).")
     st.dataframe(
-        tabla_tipos,
+        tabla_tipos.style.map(_estilo_pct, subset=["% Faltantes"]),
         use_container_width=True,
         hide_index=True,
         column_config={
@@ -746,8 +851,8 @@ else:
             "Contratos Faltantes": st.column_config.NumberColumn("Contratos Faltantes", format="%d"),
             "Contratos Encontrados": st.column_config.NumberColumn("Contratos Encontrados", format="%d"),
             "Total Contratos": st.column_config.NumberColumn("Total Contratos", format="%d"),
-            "% Faltantes": st.column_config.ProgressColumn(
-                "% Faltantes", min_value=0, max_value=100, format="%.1f %%",
+            "% Faltantes": st.column_config.NumberColumn(
+                "% Faltantes", format="%.1f %%",
                 help="% de contratos faltantes (No encontrado) sobre el total del tipo.",
             ),
         },
@@ -764,8 +869,8 @@ import plotly.graph_objects as go
 import streamlit as st
 
 # Definición de colores estratégicos
-COLOR_NEUTRO = "#4A5568"  # Slate Gray / Azul grisáceo para la mayoría
-COLOR_ALERTA = "#E68656"  # Siena / Ámbar para resaltar el #1 (Outlier)
+COLOR_NEUTRO = "#277A1F"  # Slate Gray / Azul grisáceo para la mayoría
+COLOR_ALERTA = "#F9573B"  # Siena / Ámbar para resaltar el #1 (Outlier)
 
 # --- 1. SECCIÓN DE KPI CARDS (RESUMEN EJECUTIVO) ---
 st.markdown("## Monitoreo y Gestión de Pendientes por Ordenación de Gasto")
@@ -786,7 +891,7 @@ if "ORDENADOR_CENTRO" in f.columns and "ORDENADOR_UNIDAD" in f.columns:
         help="Total de registros que requieren seguimiento.",
     )
     k2.metric(
-        label="Áreas Evaluadas",
+        label="Centros de Costo",
         value=f"{f['ORDENADOR_CENTRO'].nunique():,}",
         help="Número total de centros de costo con registros.",
     )
@@ -895,15 +1000,11 @@ with c6:
                 fig6,
                 use_container_width=True,
                 config={"displayModeBar": False},
+                
             )
 
 # --- 4. PIE DE PÁGINA EXPLICATIVO ---
-st.info(
-    "**Nota de gestión:** Las cifras presentadas reflejan el volumen de registros pendientes "
-    "de cierre/validación en el sistema. Los picos observados están asociados al volumen propio "
-    "de contratación de cada área. Se recomienda priorizar el acompañamiento técnico e instrumental "
-    "en las dependencias con mayor concentración."
-)
+
 
 # ----------------------------------------------------------------------------
 # Serie y subserie (misma logica de extraccion)
@@ -912,7 +1013,7 @@ import plotly.express as px
 import streamlit as st
 
 # Título principal del módulo
-st.markdown("## Resumen Ejecutivo: Distribución por Serie y Subserie Documental")
+st.markdown("## Distribución por Serie y Subserie Documental")
 
 # --- 1. MÉTRICAS / KPIS DIRECTIVOS ---
 total_registros = len(f)

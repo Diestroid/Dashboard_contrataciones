@@ -4,7 +4,6 @@ dist/
 .venv/
 __pycache__/
 ~$*.xlsx
+# Ignorar todos los archivos de Excel
+*.xlsx
 
-
-C:\Users\manue\OneDrive\Documents\Práctica contratación\11_dashboard\Dashboard_contrataciones\data\2024_2025_2026_ENLACES_ALFRESCO_20260922.xlsx
-C:\Users\manue\OneDrive\Documents\Práctica contratación\11_dashboard\Dashboard_contrataciones\data\2024_2025_2026_ENLACES_FINAL_BINARIO_20260922.xlsx

@@ -99,6 +99,7 @@ def base_dir():
 BASE_DIR = base_dir()
 DEFAULT_DATA_DIR = os.environ.get("DASHBOARD_DATA_DIR", os.path.join(BASE_DIR, "data"))
 ESTADO_OK = "VALIDADO 1-CLIC"
+ESTADO_FINAL_OK = "ENCONTRADO"
 VERDE_SOLIDO = "#2E7D32"
 VERDE_OSCURO = "#1B5E20"
 VERDES = ["#1b7a3d", "#2e7d32", "#43a047", "#66bb6a", "#81c784", "#00441b", "#238b45", "#a5d6a7"]
@@ -214,7 +215,16 @@ def cargar_datos(data_dir):
             full[c] = full[c].astype("string").str.strip()
     full["SERIE"] = full["SERIE_RUTA"].apply(extraer_serie) if "SERIE_RUTA" in full.columns else "Sin serie"
     full["SUBSERIE"] = full["SERIE_RUTA"].apply(extraer_subserie) if "SERIE_RUTA" in full.columns else "Sin subserie"
-    full["EN_ALFRESCO"] = full["ESTADO"] == ESTADO_OK if "ESTADO" in full.columns else False
+    if "ESTADO_FINAL" in full.columns:
+        full["EN_ALFRESCO"] = (
+            full["ESTADO_FINAL"].astype("string").str.strip().str.upper() == ESTADO_FINAL_OK
+        ).fillna(False).astype(bool)
+    elif "ESTADO" in full.columns:
+        full["EN_ALFRESCO"] = (
+            full["ESTADO"].astype("string").str.strip() == ESTADO_OK
+        ).fillna(False).astype(bool)
+    else:
+        full["EN_ALFRESCO"] = False
     # Ordenador combinado para facilitar busqueda (mantiene columnas originales)
     full["ORDENADOR_CENTRO"] = full.get("ORDENADOR_CENTRO")
     full["ORDENADOR_UNIDAD"] = full.get("ORDENADOR_UNIDAD")
@@ -343,7 +353,7 @@ with st.sidebar:
         "Estado documental",
         ["Encontrado", "No encontrado"],
         default=["Encontrado", "No encontrado"],
-        help="Encontrado = pasó la validación 1-clic (ESTADO = VALIDADO 1-CLIC). No encontrado = resto.",
+        help="Encontrado = ESTADO_FINAL = ENCONTRADO (si existe; si no, ESTADO = VALIDADO 1-CLIC). No encontrado = resto.",
     )
     with st.expander("⚙️ Filtros avanzados", expanded=False):
         _centros = sorted(df["CENTRO_COSTO"].dropna().unique().tolist()) if "CENTRO_COSTO" in df.columns else []

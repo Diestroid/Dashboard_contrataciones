@@ -111,6 +111,7 @@ RE_ANIO = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
 RE_ANIO_FILA = re.compile(r"(?:19|20)\d{2}")
 RE_SERIE = re.compile(r"([A-Z]+\d+)", re.IGNORECASE)
 RE_SUBSERIE = re.compile(r"([A-Z]+\d+\.\d+)", re.IGNORECASE)
+RE_CENTRO_NOMBRE = re.compile(r"^\s*\d+\s*[-–]\s*(.+?)\s*$")
 
 
 def extraer_serie(ruta):
@@ -133,6 +134,24 @@ def extraer_subserie(ruta):
         return "Sin subserie"
     m = RE_SUBSERIE.search(ruta)
     return m.group(1).upper() if m else extraer_serie(ruta)
+
+
+def extraer_centro_nombre(valor):
+    """Agrupa CENTRO_COSTO por nombre de dependencia, sin código de fondo.
+
+    Ej: '3112-DIVISION DE CONTRATACION' y '9244-DIVISION DE CONTRATACION'
+    -> 'DIVISION DE CONTRATACION'. Así los 2 fondos de Diana se atribuyen
+    a la misma dependencia. Si no hay prefijo numérico, devuelve el texto
+    limpio. Vacios -> 'Sin centro'.
+    """
+    if valor is None or (isinstance(valor, float) and pd.isna(valor)):
+        return "Sin centro"
+    txt = str(valor).strip()
+    if not txt or txt.lower() == "nan":
+        return "Sin centro"
+    m = RE_CENTRO_NOMBRE.match(txt)
+    nombre = m.group(1).strip() if m else txt
+    return nombre if nombre else "Sin centro"
 
 
 def detectar_anio(path):
@@ -230,6 +249,10 @@ def finalizar_consolidado(frames):
         full["EN_ALFRESCO"] = False
     full["ORDENADOR_CENTRO"] = full.get("ORDENADOR_CENTRO")
     full["ORDENADOR_UNIDAD"] = full.get("ORDENADOR_UNIDAD")
+    if "CENTRO_COSTO" in full.columns:
+        full["CENTRO_NOMBRE"] = full["CENTRO_COSTO"].map(extraer_centro_nombre)
+    else:
+        full["CENTRO_NOMBRE"] = "Sin centro"
     return full
 
 
@@ -496,12 +519,11 @@ with st.sidebar:
         _centros = sorted(df["CENTRO_COSTO"].dropna().unique().tolist()) if "CENTRO_COSTO" in df.columns else []
         sel_centros = st.multiselect("Centro de costo", _centros, default=[])
         if "ORDENADOR_CENTRO" in df.columns:
-            _ord = sorted(set(df["ORDENADOR_CENTRO"].dropna().tolist())
-                          | set(df["ORDENADOR_UNIDAD"].dropna().tolist()))
+            _ord = sorted(df["ORDENADOR_CENTRO"].dropna().astype("string").str.strip().replace("", pd.NA).dropna().unique().tolist())
         else:
             _ord = []
         sel_ord = st.multiselect("Ordenador", _ord, default=[],
-                                 help="Busca en ORDENADOR_CENTRO u ORDENADOR_UNIDAD.")
+                                 help="Filtra por ORDENADOR_CENTRO (quien ordena el gasto). Ej: DIANA MARCELA ARBOLEDA CALVO trae sus 2 fondos 3112 y 9244.")
         _series = sorted(df["SERIE"].dropna().unique().tolist()) if "SERIE" in df.columns else []
         sel_series = st.multiselect("Serie (ej: C09)", _series, default=[])
         _sub = sorted(df["SUBSERIE"].dropna().unique().tolist()) if "SUBSERIE" in df.columns else []
@@ -638,7 +660,7 @@ if sel_estado_doc and len(sel_estado_doc) < 2:
 if sel_centros:
     f = f[f["CENTRO_COSTO"].isin(sel_centros)]
 if sel_ord:
-    f = f[(f["ORDENADOR_CENTRO"].isin(sel_ord)) | (f["ORDENADOR_UNIDAD"].isin(sel_ord))]
+    f = f[f["ORDENADOR_CENTRO"].isin(sel_ord)]
 if sel_series:
     f = f[f["SERIE"].isin(sel_series)]
 if sel_sub:
@@ -696,7 +718,7 @@ with s1:
                        hovertemplate="%{label}: %{value:,} (%{percent})")
     fig2 = base_layout(fig2, height=340)
     fig2.update_layout(showlegend=True)
-    st.plotly_chart(fig2, use_container_width=True)
+    st.plotly_chart(fig2, use_container_width=True, key="pie_alfresco")
 
 with s2:
     st.markdown("#### Cobertura documental")
@@ -803,7 +825,7 @@ with c3:
     fig3.update_layout(margin=dict(l=20, r=20, t=60, b=80),
                        legend=dict(orientation="h", yanchor="top", y=-0.22, xanchor="center", x=0.5))
     fig3.update_yaxes(range=[0, _ymax * 1.22])
-    st.plotly_chart(fig3, use_container_width=True)
+    st.plotly_chart(fig3, use_container_width=True, key="bar_year_comp")
 
 with c4:
     st.markdown("#### Faltantes por año (detalle)")
@@ -823,7 +845,7 @@ with c4:
     fig4.update_xaxes(type="category", title="Año de suscripción", tickfont=dict(size=13))
     fig4.update_yaxes(title="Contratos faltantes", showgrid=True, gridcolor="#E2E8F0")
     fig4 = base_layout(fig4)
-    st.plotly_chart(fig4, use_container_width=True)
+    st.plotly_chart(fig4, use_container_width=True, key="bar_year_falt")
 
 
 # ----------------------------------------------------------------------------
@@ -1017,27 +1039,26 @@ st.caption(
     "distribuidos por área de responsabilidad."
 )
 
-if "ORDENADOR_CENTRO" in f.columns and "ORDENADOR_UNIDAD" in f.columns:
-    tot_centro = f["ORDENADOR_CENTRO"].dropna().count()
-    tot_unidad = f["ORDENADOR_UNIDAD"].dropna().count()
-    total_general = max(tot_centro, tot_unidad)
+_n_fondos = f["CENTRO_COSTO"].astype("string").str.strip().replace("", pd.NA).dropna().nunique() if "CENTRO_COSTO" in f.columns else 0
+_n_dependencias = f["CENTRO_NOMBRE"].astype("string").str.strip().replace("", pd.NA).dropna().nunique() if "CENTRO_NOMBRE" in f.columns else _n_fondos
+_n_unidades = f["ORDENADOR_UNIDAD"].astype("string").str.strip().replace("", pd.NA).dropna().nunique() if "ORDENADOR_UNIDAD" in f.columns else 0
 
-    k1, k2, k3 = st.columns(3)
-    k1.metric(
-        label="Total Pendientes",
-        value=f"{total_general:,}",
-        help="Total de registros que requieren seguimiento.",
-    )
-    k2.metric(
-        label="Centros de Costo",
-        value=f"{f['ORDENADOR_CENTRO'].nunique():,}",
-        help="Número total de centros de costo con registros.",
-    )
-    k3.metric(
-        label="Unidades de Supervisión",
-        value=f"{f['ORDENADOR_UNIDAD'].nunique():,}",
-        help="Número total de unidades superiores registradas.",
-    )
+k1, k2, k3 = st.columns(3)
+k1.metric(
+    label="Total Contratos (filtro)",
+    value=f"{len(f):,}",
+    help="Total de registros con el filtro actual.",
+)
+k2.metric(
+    label="Centros de Costo (fondos)",
+    value=f"{int(_n_fondos):,}",
+    help=f"Fondos distintos en CENTRO_COSTO. Dependencias agrupadas (sin código): {int(_n_dependencias)}. Ej: Diana -> 3112 y 9244 = 2 fondos, 1 dependencia.",
+)
+k3.metric(
+    label="Unidades de Supervisión",
+    value=f"{int(_n_unidades):,}",
+    help="Valores distintos en ORDENADOR_UNIDAD.",
+)
 
 st.write("---")
 
@@ -1120,6 +1141,7 @@ with c5:
                 fig5,
                 use_container_width=True,
                 config={"displayModeBar": False},
+                key="top_ord_centro",
             )
 
 with c6:
@@ -1138,10 +1160,58 @@ with c6:
                 fig6,
                 use_container_width=True,
                 config={"displayModeBar": False},
-                
+                key="top_ord_unidad",
             )
 
-# --- 4. PIE DE PÁGINA EXPLICATIVO ---
+# --- 4. ATRIBUCIÓN ORDENADOR (CENTRO) -> CENTROS DE COSTO ---
+# Atribuye solo por ORDENADOR_CENTRO (quien ordena el gasto).
+# Muestra fondos separados (CENTRO_COSTO con código) y dependencia agrupada
+# (CENTRO_NOMBRE sin código). Ej: DIANA -> DIVISION DE CONTRATACION = 41
+# (3112: 26 + 9244: 15). No altera los gráficos Top-15 de arriba.
+st.markdown("#### Centros de costo por ordenador")
+st.caption(
+    "Atribución por ORDENADOR_CENTRO. Fondos separados y total agrupado por dependencia (sin código)."
+)
+if "ORDENADOR_CENTRO" in f.columns and "CENTRO_COSTO" in f.columns:
+    _atr = f.copy()
+    _atr["ORDENADOR_CENTRO"] = _atr["ORDENADOR_CENTRO"].astype("string").str.strip()
+    _atr = _atr[_atr["ORDENADOR_CENTRO"].notna() & (_atr["ORDENADOR_CENTRO"] != "")]
+    if "CENTRO_NOMBRE" not in _atr.columns:
+        _atr["CENTRO_NOMBRE"] = _atr["CENTRO_COSTO"].map(extraer_centro_nombre)
+    if _atr.empty:
+        st.info("Sin datos registrados para este filtro.")
+    else:
+        _cruce = (
+            _atr.groupby(["ORDENADOR_CENTRO", "CENTRO_NOMBRE", "CENTRO_COSTO"], dropna=False)
+            .size()
+            .reset_index(name="N contratos")
+            .sort_values(["ORDENADOR_CENTRO", "N contratos"], ascending=[True, False])
+        )
+        _tot_ord = _atr.groupby("ORDENADOR_CENTRO").size().reset_index(name="Total ordenador")
+        _cruce = _cruce.merge(_tot_ord, on="ORDENADOR_CENTRO", how="left")
+        _cruce["% del ordenador"] = (_cruce["N contratos"] / _cruce["Total ordenador"].replace(0, pd.NA)).fillna(0) * 100
+        _cruce = _cruce.rename(columns={
+            "ORDENADOR_CENTRO": "Ordenador (centro)",
+            "CENTRO_NOMBRE": "Dependencia (agrupada)",
+            "CENTRO_COSTO": "Fondo (centro de costo)",
+        })
+        st.dataframe(
+            _cruce,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Ordenador (centro)": st.column_config.TextColumn("Ordenador (centro)", width="large"),
+                "Dependencia (agrupada)": st.column_config.TextColumn("Dependencia (agrupada)", width="large"),
+                "Fondo (centro de costo)": st.column_config.TextColumn("Fondo (centro de costo)", width="large"),
+                "N contratos": st.column_config.NumberColumn("N contratos", format="%d"),
+                "Total ordenador": st.column_config.NumberColumn("Total ordenador", format="%d"),
+                "% del ordenador": st.column_config.NumberColumn("% del ordenador", format="%.1f %%"),
+            },
+        )
+else:
+    st.warning("Columnas ORDENADOR_CENTRO / CENTRO_COSTO no encontradas.")
+
+# --- 5. PIE DE PÁGINA EXPLICATIVO ---
 
 
 # ----------------------------------------------------------------------------
@@ -1212,7 +1282,7 @@ with cc1:
 
     fig_s = base_layout(fig_s)
     fig_s.update_layout(margin=dict(r=40, l=10, t=10, b=10))
-    st.plotly_chart(fig_s, use_container_width=True)
+    st.plotly_chart(fig_s, use_container_width=True, key="top_series")
 
 # --- 4. GRÁFICO POR SUBSERIE ---
 with cc2:
@@ -1245,7 +1315,7 @@ with cc2:
 
     fig_ss = base_layout(fig_ss)
     fig_ss.update_layout(margin=dict(r=40, l=10, t=10, b=10))
-    st.plotly_chart(fig_ss, use_container_width=True)
+    st.plotly_chart(fig_ss, use_container_width=True, key="top_subseries")
 
 
 
@@ -1259,7 +1329,7 @@ st.caption("Tabla filtrada lista para gestión: identifica pendientes y abre el 
 f = f.copy()
 f["ESTADO_DOCUMENTAL"] = f["EN_ALFRESCO"].map(lambda v: "Encontrado" if bool(v) else "No encontrado")
 
-cols_pref = ["AÑO", "CONTRATO", "TIPO", "CENTRO_COSTO", "NOMBRE_CONTRATISTA",
+cols_pref = ["AÑO", "CONTRATO", "TIPO", "CENTRO_COSTO", "CENTRO_NOMBRE", "NOMBRE_CONTRATISTA",
              "ORDENADOR_CENTRO", "ORDENADOR_UNIDAD", "ESTADO_DOCUMENTAL",
              "SERIE", "SUBSERIE", "SERIE_RUTA", "CARPETA_ALFRESCO",
              "URL_ALFRESCO_1CLIC"]
@@ -1283,6 +1353,7 @@ st.dataframe(
         "CONTRATO": st.column_config.TextColumn("Contrato", width="medium"),
         "TIPO": st.column_config.TextColumn("Tipo", width="small"),
         "CENTRO_COSTO": st.column_config.TextColumn("Centro de costo", width="large"),
+        "CENTRO_NOMBRE": st.column_config.TextColumn("Dependencia (agrupada)", width="large"),
         "NOMBRE_CONTRATISTA": st.column_config.TextColumn("Contratista", width="large"),
         "ORDENADOR_CENTRO": st.column_config.TextColumn("Ordenador (centro)", width="medium"),
         "ORDENADOR_UNIDAD": st.column_config.TextColumn("Ordenador (unidad)", width="medium"),

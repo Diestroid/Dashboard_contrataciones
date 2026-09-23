@@ -1170,7 +1170,8 @@ with c6:
 # (3112: 26 + 9244: 15). No altera los gráficos Top-15 de arriba.
 st.markdown("#### Centros de costo por ordenador")
 st.caption(
-    "Atribución por ORDENADOR_CENTRO. Fondos separados y total agrupado por dependencia (sin código)."
+    "Atribución por ORDENADOR_CENTRO. Fondos separados y total agrupado por dependencia (sin código). "
+    "Semáforo por % faltantes: 🟢 Bajo (<50%) · 🟡 Medio (50-70%) · 🔴 Crítico (>70%)."
 )
 if "ORDENADOR_CENTRO" in f.columns and "CENTRO_COSTO" in f.columns:
     _atr = f.copy()
@@ -1181,12 +1182,15 @@ if "ORDENADOR_CENTRO" in f.columns and "CENTRO_COSTO" in f.columns:
     if _atr.empty:
         st.info("Sin datos registrados para este filtro.")
     else:
-        _cruce = (
-            _atr.groupby(["ORDENADOR_CENTRO", "CENTRO_NOMBRE", "CENTRO_COSTO"], dropna=False)
-            .size()
-            .reset_index(name="N contratos")
-            .sort_values(["ORDENADOR_CENTRO", "N contratos"], ascending=[True, False])
+        _grp = _atr.groupby(["ORDENADOR_CENTRO", "CENTRO_NOMBRE", "CENTRO_COSTO"], dropna=False)["EN_ALFRESCO"]
+        _cruce = _grp.agg(["size", "sum"]).reset_index().rename(
+            columns={"size": "N contratos", "sum": "Encontrados en Alfresco"}
         )
+        _cruce["Encontrados en Alfresco"] = _cruce["Encontrados en Alfresco"].fillna(0).astype(int)
+        _cruce["N contratos"] = _cruce["N contratos"].astype(int)
+        _cruce["Faltantes"] = _cruce["N contratos"] - _cruce["Encontrados en Alfresco"]
+        _cruce["% Faltantes"] = (_cruce["Faltantes"] / _cruce["N contratos"].replace(0, pd.NA)).fillna(0) * 100
+        _cruce = _cruce.sort_values(["ORDENADOR_CENTRO", "N contratos"], ascending=[True, False])
         _tot_ord = _atr.groupby("ORDENADOR_CENTRO").size().reset_index(name="Total ordenador")
         _cruce = _cruce.merge(_tot_ord, on="ORDENADOR_CENTRO", how="left")
         _cruce["% del ordenador"] = (_cruce["N contratos"] / _cruce["Total ordenador"].replace(0, pd.NA)).fillna(0) * 100
@@ -1195,8 +1199,21 @@ if "ORDENADOR_CENTRO" in f.columns and "CENTRO_COSTO" in f.columns:
             "CENTRO_NOMBRE": "Dependencia (agrupada)",
             "CENTRO_COSTO": "Fondo (centro de costo)",
         })
+
+        def _estilo_pct_centro(v):
+            try:
+                x = float(v)
+            except (TypeError, ValueError):
+                return ""
+            s = nivel_semaforo(x)
+            if s.startswith("🔴"):
+                return "background-color: #FDECEA; color: #7F1D1D; font-weight: 600;"
+            if s.startswith("🟡"):
+                return "background-color: #FEF9C3; color: #713F12; font-weight: 600;"
+            return "background-color: #DCFCE7; color: #14532D; font-weight: 600;"
+
         st.dataframe(
-            _cruce,
+            _cruce.style.map(_estilo_pct_centro, subset=["% Faltantes"]),
             use_container_width=True,
             hide_index=True,
             column_config={
@@ -1204,6 +1221,10 @@ if "ORDENADOR_CENTRO" in f.columns and "CENTRO_COSTO" in f.columns:
                 "Dependencia (agrupada)": st.column_config.TextColumn("Dependencia (agrupada)", width="large"),
                 "Fondo (centro de costo)": st.column_config.TextColumn("Fondo (centro de costo)", width="large"),
                 "N contratos": st.column_config.NumberColumn("N contratos", format="%d"),
+                "Encontrados en Alfresco": st.column_config.NumberColumn("Encontrados en Alfresco", format="%d"),
+                "Faltantes": st.column_config.NumberColumn("Faltantes", format="%d"),
+                "% Faltantes": st.column_config.NumberColumn("% Faltantes", format="%.1f %%",
+                    help="% de contratos no encontrados sobre el total del fondo."),
                 "Total ordenador": st.column_config.NumberColumn("Total ordenador", format="%d"),
                 "% del ordenador": st.column_config.NumberColumn("% del ordenador", format="%.1f %%"),
             },

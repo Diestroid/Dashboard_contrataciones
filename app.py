@@ -1372,8 +1372,8 @@ import unicodedata as _unicodedata
 
 st.markdown("## Gestión de correos a ordenadores")
 st.caption(
-    "Suba la base de ordenadores y descargue el Excel de correos "
-    "(correo | con copia | cuerpo del correo) con los contratos no encontrados en Alfresco, "
+    "Suba la base de ordenadores y descargue la tabla para Power Automate "
+    "(correo | con copia | cuerpo del correo | archivo adjunto) más el ZIP con 1 Excel por ordenador, "
     "según los filtros actuales."
 )
 
@@ -1417,10 +1417,19 @@ def _cargar_base_correos(file_bytes, nombre_archivo):
     return df_raw
 
 
-def _construir_excel_correos(f_filtrado, base_df, tam_lote=80, max_obj=120):
+def _nombre_archivo_ordenador(nombre):
+    base = _norm_ord(nombre).replace(" ", "_")
+    base = re.sub(r"[^A-Z0-9_]+", "", base).strip("_")[:60] or "ORDENADOR"
+    return f"Contratos_pendientes_{base}.xlsx"
+
+
+def _construir_paquete_correos(f_filtrado, base_df):
     """Cruza f_filtrado (solo NO encontrados) con base_df. Ignora NaN en ORDENADOR_CENTRO.
 
-    Devuelve (bytes_xlsx, df_correos_3cols, df_control, n_omitidos, df_omitidos).
+    Devuelve (tabla_bytes, zip_bytes, df_tabla_4cols, df_control, n_omitidos,
+    df_omitidos, sin_correo, archivos_dict).
+    - df_tabla_4cols: correo | con copia | cuerpo del correo | archivo adjunto
+    - archivos_dict: {nombre_archivo: bytes_xlsx_detalle}
     """
     cols_upper = {str(c).strip().upper(): c for c in base_df.columns}
     c_ord = cols_upper.get("ORDENADOR DE GASTO")
@@ -1450,8 +1459,11 @@ def _construir_excel_correos(f_filtrado, base_df, tam_lote=80, max_obj=120):
     pendientes["_norm_centro"] = pendientes["ORDENADOR_CENTRO"].map(_norm_ord)
     omitidos = pendientes[pendientes["_norm_centro"] == ""].copy()
     mapeables = pendientes[pendientes["_norm_centro"] != ""].copy()
+    tiene_anio = "AÑO" in mapeables.columns
 
     filas = []
+    ctrl_filas = []
+    archivos = {}
     sin_correo = []
     for norm_ord, g in mapeables.groupby("_norm_centro"):
         r_base = mapa.get(norm_ord)
@@ -1461,69 +1473,94 @@ def _construir_excel_correos(f_filtrado, base_df, tam_lote=80, max_obj=120):
         nombre = str(r_base[c_ord]).strip()
         correo = r_base["_para"]
         cc = r_base["_cc"]
-        g_ord = g.sort_values(["CONTRATO"] if "CONTRATO" in g.columns else list(g.columns[:1])).reset_index(drop=True)
+        if tiene_anio:
+            g_ord = g.sort_values(["AÑO", "CONTRATO"] if "CONTRATO" in g.columns else ["AÑO"]).reset_index(drop=True)
+            conteo_vig = g_ord["AÑO"].fillna("Sin vigencia").astype(str).str.strip().value_counts().sort_index()
+        else:
+            g_ord = g.sort_values(["CONTRATO"] if "CONTRATO" in g.columns else list(g.columns[:1])).reset_index(drop=True)
+            conteo_vig = pd.Series(dtype=int)
         n = len(g_ord)
-        for ini in range(0, n, tam_lote):
-            lote = g_ord.iloc[ini:ini + tam_lote]
-            j = ini // tam_lote + 1
-            n_lotes = (n + tam_lote - 1) // tam_lote
-            parte_txt = f" (Parte {j} de {n_lotes})" if n_lotes > 1 else ""
-            rango_txt = f" (contratos {ini + 1} a {ini + len(lote)} de {n})" if n_lotes > 1 else ""
-            lineas = []
-            for k, (_, c) in enumerate(lote.iterrows(), 1):
-                contrato = str(c.get("CONTRATO", "") or "").strip()
-                contratista = str(c.get("NOMBRE_CONTRATISTA", "") or "").strip()
-                objeto = str(c.get("OBJETO_CONTRATO", "") or "").strip()
-                if len(objeto) > max_obj:
-                    objeto = objeto[:max_obj - 3] + "..."
-                centro = str(c.get("CENTRO_COSTO", "") or "").strip()
-                tipo = str(c.get("TIPO", "") or "").strip()
-                lineas.append(
-                    f"{ini + k}. Contrato {contrato} (Tipo {tipo}) | "
-                    f"Contratista: {contratista} | Centro de costo: {centro} | Objeto: {objeto}"
-                )
-            cuerpo = (
-                f"Cordial saludo, estimado(a) ordenador(a) de gasto {nombre}{parte_txt}:\n\n"
-                f"En el marco del seguimiento a la gestión documental en el sistema Alfresco, se identificó que "
-                f"{n} contrato(s) a su cargo (ORDENADOR_CENTRO) no fueron encontrados en el sistema{rango_txt}:\n\n"
-                + "\n".join(lineas)
-                + "\n\nAgradecemos su apoyo verificando la documentación y regularizando el cargue correspondiente en Alfresco.\n\n"
-                f"Cordialmente,\nDivisión de Contratación – UIS"
-            )
-            filas.append({
+        if len(conteo_vig):
+            detalle_vig = ", ".join(f"{vig}: {int(c)}" for vig, c in conteo_vig.items())
+        else:
+            detalle_vig = f"Total: {n}"
+        nombre_archivo = _nombre_archivo_ordenador(nombre)
+        # Evitar colisiones de nombre entre ordenadores normalizados iguales
+        _suf = 2
+        _base_fn = nombre_archivo
+        while nombre_archivo in archivos:
+            nombre_archivo = _base_fn.replace(".xlsx", f"_{_suf}.xlsx")
+            _suf += 1
+        cuerpo = (
+            f"Cordial saludo, estimado(a) ordenador(a) de gasto {nombre}:\n\n"
+            f"Desde la División de Contratación junto con el apoyo de Gestión Documental, se identificó que "
+            f"tiene pendiente por cargar en sistema Alfresco los siguientes contratos por vigencias: {detalle_vig} (Total: {n}).\n\n"
+            f"Se adjunta el archivo {nombre_archivo} con el detalle para facilitar su seguimiento. "
+            f"Agradecemos su apoyo verificando la documentación y regularizando el cargue correspondiente en Alfresco.\n\n"
+            f"Cordialmente,\nDivisión de Contratación – UIS"
+        )
+        filas.append({
+            "correo": correo,
+            "con copia": cc,
+            "cuerpo del correo": cuerpo,
+            "archivo adjunto": nombre_archivo,
+        })
+        for vig, c in (conteo_vig.items() if len(conteo_vig) else [("Total", n)]):
+            ctrl_filas.append({
+                "ORDENADOR_CENTRO": nombre,
+                "Vigencia": str(vig),
+                "N_contratos": int(c),
+                "N_total_ordenador": n,
                 "correo": correo,
-                "con copia": cc,
-                "cuerpo del correo": cuerpo,
-                "_ordenador": nombre,
-                "_n": n,
-                "_parte": f"{j}/{n_lotes}",
+                "archivo adjunto": nombre_archivo,
             })
+        cols_det = ["AÑO", "CONTRATO", "TIPO", "CENTRO_COSTO", "NOMBRE_CONTRATISTA", "OBJETO_CONTRATO", "ESTADO_FINAL"]
+        cols_det = [c for c in cols_det if c in g_ord.columns]
+        det = g_ord[cols_det].copy().rename(columns={
+            "AÑO": "Vigencia", "CONTRATO": "Contrato", "TIPO": "Tipo",
+            "CENTRO_COSTO": "Centro de costo", "NOMBRE_CONTRATISTA": "Contratista",
+            "OBJETO_CONTRATO": "Objeto", "ESTADO_FINAL": "Estado",
+        })
+        buf_det = io.BytesIO()
+        with pd.ExcelWriter(buf_det, engine="openpyxl") as w:
+            det.to_excel(w, sheet_name="Contratos pendientes", index=False)
+            ws = w.sheets["Contratos pendientes"]
+            anchos = {"Vigencia": 12, "Contrato": 20, "Tipo": 10, "Centro de costo": 45,
+                      "Contratista": 40, "Objeto": 90, "Estado": 16}
+            for idx, col in enumerate(det.columns, 1):
+                ws.column_dimensions[ws.cell(row=1, column=idx).column_letter].width = anchos.get(col, 25)
+            import openpyxl.styles as _xl_s2
+            for row in ws.iter_rows(min_row=2, max_row=max(ws.max_row, 2), max_col=len(det.columns)):
+                for cell in row:
+                    cell.alignment = _xl_s2.Alignment(wrap_text=True, vertical="top")
+        archivos[nombre_archivo] = buf_det.getvalue()
 
-    df_correos = pd.DataFrame(filas, columns=["correo", "con copia", "cuerpo del correo", "_ordenador", "_n", "_parte"])
-    if not df_correos.empty:
-        df_correos = df_correos.sort_values(["_ordenador", "_parte"]).reset_index(drop=True)
-    df_control = (
-        df_correos[["_ordenador", "_n", "_parte", "correo", "con copia"]]
-        .rename(columns={"_ordenador": "ORDENADOR_CENTRO", "_n": "N_contratos_no_encontrados", "_parte": "Parte"})
-        if not df_correos.empty else pd.DataFrame(columns=["ORDENADOR_CENTRO", "N_contratos_no_encontrados", "Parte", "correo", "con copia"])
-    )
-    out_final = df_correos[["correo", "con copia", "cuerpo del correo"]] if not df_correos.empty else df_correos
+    df_tabla = pd.DataFrame(filas, columns=["correo", "con copia", "cuerpo del correo", "archivo adjunto"])
+    if not df_tabla.empty:
+        df_tabla = df_tabla.sort_values(["correo", "archivo adjunto"]).reset_index(drop=True)
+    df_control = pd.DataFrame(ctrl_filas, columns=["ORDENADOR_CENTRO", "Vigencia", "N_contratos", "N_total_ordenador", "correo", "archivo adjunto"])
 
     import openpyxl.styles as _xl_styles
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as w:
-        out_final.to_excel(w, sheet_name="Correos", index=False)
+    import zipfile as _zipfile
+    buf_tabla = io.BytesIO()
+    with pd.ExcelWriter(buf_tabla, engine="openpyxl") as w:
+        df_tabla.to_excel(w, sheet_name="Correos", index=False)
         ws = w.sheets["Correos"]
         ws.column_dimensions["A"].width = 45
         ws.column_dimensions["B"].width = 55
-        ws.column_dimensions["C"].width = 140
-        for row in ws.iter_rows(min_row=2, max_row=max(ws.max_row, 2), max_col=3):
+        ws.column_dimensions["C"].width = 120
+        ws.column_dimensions["D"].width = 55
+        for row in ws.iter_rows(min_row=2, max_row=max(ws.max_row, 2), max_col=4):
             row[2].alignment = _xl_styles.Alignment(wrap_text=True, vertical="top")
         df_control.to_excel(w, sheet_name="Control_conteos", index=False)
         ws2 = w.sheets["Control_conteos"]
-        for col, ancho in zip(["A", "B", "C", "D", "E"], [45, 22, 12, 45, 55]):
+        for col, ancho in zip(["A", "B", "C", "D", "E", "F"], [45, 14, 14, 18, 45, 55]):
             ws2.column_dimensions[col].width = ancho
-    return buf.getvalue(), out_final, df_control, len(omitidos), omitidos, sin_correo
+    buf_zip = io.BytesIO()
+    with _zipfile.ZipFile(buf_zip, "w", _zipfile.ZIP_DEFLATED) as z:
+        for fn, data in archivos.items():
+            z.writestr(fn, data)
+    return buf_tabla.getvalue(), buf_zip.getvalue(), df_tabla, df_control, len(omitidos), omitidos, sin_correo, archivos
 
 
 base_subida = st.file_uploader(
@@ -1566,30 +1603,28 @@ else:
         st.info("Suba el Excel de la base de ordenadores para generar los correos.")
 
 if base_df is not None:
-    c_p1, c_p2 = st.columns(2)
-    with c_p1:
-        tam_lote = st.number_input("Contratos por correo (lote)", min_value=20, max_value=200, value=80, step=10,
-                                   help="Si un ordenador supera el lote, se divide en Parte 1 de N para no superar el límite de Excel (32.767 caracteres).")
-    with c_p2:
-        st.caption(f"Fuente base: {origen_base}")
+    st.caption(f"Fuente base: {origen_base}")
+    if "ESTADO_FINAL" in f.columns:
+        n_pend_f = int((f["ESTADO_FINAL"].astype(str).str.strip().str.upper() == "NO ENCONTRADO").sum())
+    else:
         n_pend_f = int((~f["EN_ALFRESCO"].astype(bool)).sum()) if "EN_ALFRESCO" in f.columns else 0
-        st.caption(f"Pendientes en el filtro actual: {fmt_num(n_pend_f)}")
-    if st.button("✉️ Generar Excel de correos", use_container_width=True, key="btn_gen_correos"):
+    st.caption(f"Pendientes en el filtro actual: {fmt_num(n_pend_f)}")
+    if st.button("✉️ Generar tabla + ZIP por ordenador", use_container_width=True, key="btn_gen_correos"):
         st.session_state["correos_generados"] = True
     if st.session_state.get("correos_generados"):
         try:
-            xlsx_bytes, df_correos, df_ctrl, n_omit, df_omit, sin_correo = _construir_excel_correos(f, base_df, tam_lote=int(tam_lote))
+            tabla_bytes, zip_bytes, df_tabla, df_ctrl, n_omit, df_omit, sin_correo, _arch = _construir_paquete_correos(f, base_df)
         except ValueError as e:
             st.error(str(e))
-            xlsx_bytes = None
+            tabla_bytes = None
         except Exception:
-            st.error("No se pudo generar el Excel de correos. Verifique ambas fuentes.")
-            xlsx_bytes = None
-        if xlsx_bytes is not None:
-            if df_correos.empty:
+            st.error("No se pudo generar el paquete de correos. Verifique ambas fuentes.")
+            tabla_bytes = None
+        if tabla_bytes is not None:
+            if df_tabla.empty:
                 st.warning("No hay contratos pendientes con ordenador para los filtros actuales.")
             else:
-                st.success(f"✓ {fmt_num(len(df_correos))} correos para {fmt_num(df_ctrl['ORDENADOR_CENTRO'].nunique())} ordenadores.")
+                st.success(f"✓ {fmt_num(len(df_tabla))} ordenadores con {fmt_num(int(df_ctrl['N_contratos'].sum())) if not df_ctrl.empty else 0} contratos en ZIP.")
             if n_omit:
                 st.warning(f"Se omitieron {fmt_num(n_omit)} contratos sin ORDENADOR_CENTRO (NaN/vacío). Por ahora se ignoran; a futuro esas filas no deberían existir en el Excel fuente.")
                 with st.expander("Ver contratos omitidos (sin ordenador)"):
@@ -1599,17 +1634,28 @@ if base_df is not None:
                                        "contratos_sin_ordenador.csv", "text/csv", key="dl_omit")
             if sin_correo:
                 st.warning(f"{len(sin_correo)} ordenadores del filtro no tienen correo en la base y se excluyeron.")
-            if not df_correos.empty:
+            if not df_tabla.empty:
                 st.markdown("**Vista previa (primeros 10)**")
-                _prev = df_ctrl.head(10)
-                st.dataframe(_prev, use_container_width=True, hide_index=True)
+                st.dataframe(df_tabla.head(10), use_container_width=True, hide_index=True)
                 with st.expander("Ver ejemplo de cuerpo del primer correo"):
-                    st.text(str(df_correos.iloc[0]["cuerpo del correo"])[:3000])
-                st.download_button(
-                    "⬇️ Descargar Excel de correos",
-                    xlsx_bytes,
-                    f"Correos_ordenadores_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                    key="dl_correos",
-                )
+                    st.text(str(df_tabla.iloc[0]["cuerpo del correo"])[:2000])
+                d1, d2 = st.columns(2)
+                with d1:
+                    st.download_button(
+                        "⬇️ Descargar tabla para Power Automate",
+                        tabla_bytes,
+                        f"Tabla_correos_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                        key="dl_tabla_pa",
+                    )
+                with d2:
+                    st.download_button(
+                        "⬇️ Descargar ZIP con Excels por ordenador",
+                        zip_bytes,
+                        f"Adjuntos_por_ordenador_{datetime.now().strftime('%Y%m%d_%H%M')}.zip",
+                        "application/zip",
+                        use_container_width=True,
+                        key="dl_zip_adj",
+                    )
+                st.caption("En Power Automate: suba el ZIP descomprimido a SharePoint (/CorreosAdjuntos/) y use la tabla (Lista de filas) → Obtener contenido del archivo por 'archivo adjunto' → Enviar correo (V2) con un solo adjunto (Nombre + Contenido).")

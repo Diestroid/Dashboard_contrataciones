@@ -1362,3 +1362,254 @@ st.dataframe(
     },
 )
 st.caption("La columna “URL Alfresco” solo muestra enlace cuando el dataset trae URL. No se generan enlaces artificiales.")
+
+
+# ----------------------------------------------------------------------------
+# Gestión de correos a ordenadores (subir base + descargar Excel de correos)
+# Todo en memoria para Streamlit Cloud; no altera la lógica anterior.
+# ----------------------------------------------------------------------------
+import unicodedata as _unicodedata
+
+st.markdown("## Gestión de correos a ordenadores")
+st.caption(
+    "Suba la base de ordenadores y descargue el Excel de correos "
+    "(correo | con copia | cuerpo del correo) con los contratos no encontrados en Alfresco, "
+    "según los filtros actuales."
+)
+
+_MAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+
+
+def _norm_ord(s):
+    if s is None or (isinstance(s, float) and pd.isna(s)):
+        return ""
+    try:
+        if pd.isna(s):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    t = str(s).strip().upper()
+    t = "".join(c for c in _unicodedata.normalize("NFD", t) if _unicodedata.category(c) != "Mn")
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _clean_mails(s):
+    if s is None:
+        return ""
+    try:
+        if pd.isna(s):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    encontrados = _MAIL_RE.findall(str(s))
+    vistos = []
+    for m in encontrados:
+        m = m.strip().lower()
+        if m and m not in vistos:
+            vistos.append(m)
+    return "; ".join(vistos)
+
+
+@st.cache_data(show_spinner="Procesando base de correos...")
+def _cargar_base_correos(file_bytes, nombre_archivo):
+    df_raw = pd.read_excel(io.BytesIO(file_bytes), sheet_name="Ordenadores de gasto", engine="openpyxl", dtype=str)
+    df_raw.columns = [str(c).strip() for c in df_raw.columns]
+    return df_raw
+
+
+def _construir_excel_correos(f_filtrado, base_df, tam_lote=80, max_obj=120):
+    """Cruza f_filtrado (solo NO encontrados) con base_df. Ignora NaN en ORDENADOR_CENTRO.
+
+    Devuelve (bytes_xlsx, df_correos_3cols, df_control, n_omitidos, df_omitidos).
+    """
+    cols_upper = {str(c).strip().upper(): c for c in base_df.columns}
+    c_ord = cols_upper.get("ORDENADOR DE GASTO")
+    c_para = cols_upper.get("CORREO INSTITUCIONAL")
+    c_cc = cols_upper.get("CORREOS DE APOYO")
+    c_clave = cols_upper.get("CLAVE")
+    if c_ord is None or c_para is None:
+        raise ValueError("La base debe traer al menos 'Ordenador de gasto' y 'Correo institucional'.")
+    b = base_df.copy()
+    b["_norm_ord"] = b[c_ord].map(_norm_ord)
+    b["_norm_clave"] = b[c_clave].map(_norm_ord) if c_clave is not None else ""
+    b["_para"] = b[c_para].map(_clean_mails)
+    b["_cc"] = b[c_cc].map(_clean_mails) if c_cc is not None else ""
+    b = b[b["_norm_ord"] != ""].copy()
+    mapa = {}
+    for _, r in b.iterrows():
+        for k in (r["_norm_ord"], r["_norm_clave"]):
+            if k and k not in mapa:
+                mapa[k] = r
+
+    if "ORDENADOR_CENTRO" not in f_filtrado.columns:
+        raise ValueError("El dataset filtrado no trae la columna ORDENADOR_CENTRO.")
+    if "ESTADO_FINAL" in f_filtrado.columns:
+        pendientes = f_filtrado[f_filtrado["ESTADO_FINAL"].astype(str).str.strip().str.upper() == "NO ENCONTRADO"].copy()
+    else:
+        pendientes = f_filtrado[~f_filtrado["EN_ALFRESCO"].astype(bool)].copy()
+    pendientes["_norm_centro"] = pendientes["ORDENADOR_CENTRO"].map(_norm_ord)
+    omitidos = pendientes[pendientes["_norm_centro"] == ""].copy()
+    mapeables = pendientes[pendientes["_norm_centro"] != ""].copy()
+
+    filas = []
+    sin_correo = []
+    for norm_ord, g in mapeables.groupby("_norm_centro"):
+        r_base = mapa.get(norm_ord)
+        if r_base is None:
+            sin_correo.append(norm_ord)
+            continue
+        nombre = str(r_base[c_ord]).strip()
+        correo = r_base["_para"]
+        cc = r_base["_cc"]
+        g_ord = g.sort_values(["CONTRATO"] if "CONTRATO" in g.columns else list(g.columns[:1])).reset_index(drop=True)
+        n = len(g_ord)
+        for ini in range(0, n, tam_lote):
+            lote = g_ord.iloc[ini:ini + tam_lote]
+            j = ini // tam_lote + 1
+            n_lotes = (n + tam_lote - 1) // tam_lote
+            parte_txt = f" (Parte {j} de {n_lotes})" if n_lotes > 1 else ""
+            rango_txt = f" (contratos {ini + 1} a {ini + len(lote)} de {n})" if n_lotes > 1 else ""
+            lineas = []
+            for k, (_, c) in enumerate(lote.iterrows(), 1):
+                contrato = str(c.get("CONTRATO", "") or "").strip()
+                contratista = str(c.get("NOMBRE_CONTRATISTA", "") or "").strip()
+                objeto = str(c.get("OBJETO_CONTRATO", "") or "").strip()
+                if len(objeto) > max_obj:
+                    objeto = objeto[:max_obj - 3] + "..."
+                centro = str(c.get("CENTRO_COSTO", "") or "").strip()
+                tipo = str(c.get("TIPO", "") or "").strip()
+                lineas.append(
+                    f"{ini + k}. Contrato {contrato} (Tipo {tipo}) | "
+                    f"Contratista: {contratista} | Centro de costo: {centro} | Objeto: {objeto}"
+                )
+            cuerpo = (
+                f"Cordial saludo, estimado(a) ordenador(a) de gasto {nombre}{parte_txt}:\n\n"
+                f"En el marco del seguimiento a la gestión documental en el sistema Alfresco, se identificó que "
+                f"{n} contrato(s) a su cargo (ORDENADOR_CENTRO) no fueron encontrados en el sistema{rango_txt}:\n\n"
+                + "\n".join(lineas)
+                + "\n\nAgradecemos su apoyo verificando la documentación y regularizando el cargue correspondiente en Alfresco.\n\n"
+                f"Cordialmente,\nDivisión de Contratación – UIS"
+            )
+            filas.append({
+                "correo": correo,
+                "con copia": cc,
+                "cuerpo del correo": cuerpo,
+                "_ordenador": nombre,
+                "_n": n,
+                "_parte": f"{j}/{n_lotes}",
+            })
+
+    df_correos = pd.DataFrame(filas, columns=["correo", "con copia", "cuerpo del correo", "_ordenador", "_n", "_parte"])
+    if not df_correos.empty:
+        df_correos = df_correos.sort_values(["_ordenador", "_parte"]).reset_index(drop=True)
+    df_control = (
+        df_correos[["_ordenador", "_n", "_parte", "correo", "con copia"]]
+        .rename(columns={"_ordenador": "ORDENADOR_CENTRO", "_n": "N_contratos_no_encontrados", "_parte": "Parte"})
+        if not df_correos.empty else pd.DataFrame(columns=["ORDENADOR_CENTRO", "N_contratos_no_encontrados", "Parte", "correo", "con copia"])
+    )
+    out_final = df_correos[["correo", "con copia", "cuerpo del correo"]] if not df_correos.empty else df_correos
+
+    import openpyxl.styles as _xl_styles
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        out_final.to_excel(w, sheet_name="Correos", index=False)
+        ws = w.sheets["Correos"]
+        ws.column_dimensions["A"].width = 45
+        ws.column_dimensions["B"].width = 55
+        ws.column_dimensions["C"].width = 140
+        for row in ws.iter_rows(min_row=2, max_row=max(ws.max_row, 2), max_col=3):
+            row[2].alignment = _xl_styles.Alignment(wrap_text=True, vertical="top")
+        df_control.to_excel(w, sheet_name="Control_conteos", index=False)
+        ws2 = w.sheets["Control_conteos"]
+        for col, ancho in zip(["A", "B", "C", "D", "E"], [45, 22, 12, 45, 55]):
+            ws2.column_dimensions[col].width = ancho
+    return buf.getvalue(), out_final, df_control, len(omitidos), omitidos, sin_correo
+
+
+base_subida = st.file_uploader(
+    "📧 Subir base de ordenadores y correos (.xlsx, hoja “Ordenadores de gasto”)",
+    type=["xlsx"],
+    key="base_correos_upload",
+    help="Excel con columnas: Ordenador de gasto, Correo institucional, Correos de apoyo, Clave. Se procesa en memoria.",
+)
+base_df = None
+origen_base = None
+if base_subida is not None:
+    try:
+        _bb = base_subida.getvalue()
+    except Exception:
+        st.error("No se pudo leer la base subida. Intente de nuevo.")
+        _bb = None
+    if _bb:
+        try:
+            base_df = _cargar_base_correos(_bb, base_subida.name or "base.xlsx")
+            origen_base = f"Archivo subido: {base_subida.name}"
+            st.success(f"✓ Base cargada: {len(base_df)} ordenadores ({base_subida.name})")
+        except ValueError as e:
+            st.error(f"Base inválida: {e}. Debe traer la hoja “Ordenadores de gasto”.")
+            base_df = None
+        except Exception:
+            st.error("No se pudo procesar la base. Verifique que sea un .xlsx válido con la hoja “Ordenadores de gasto”.")
+            base_df = None
+else:
+    _local_base = os.path.join(DEFAULT_DATA_DIR, "Base_Ordenadores_y_Supervisores_UIS_2026.xlsx")
+    if os.path.isfile(_local_base):
+        try:
+            with open(_local_base, "rb") as fh:
+                base_df = _cargar_base_correos(fh.read(), os.path.basename(_local_base))
+            origen_base = f"Base local: {os.path.basename(_local_base)}"
+            st.info("Usando la base local de la carpeta de datos. Puede subir otra con el cargador de arriba.")
+        except Exception:
+            st.warning("No se pudo leer la base local. Suba el Excel con el cargador.")
+            base_df = None
+    else:
+        st.info("Suba el Excel de la base de ordenadores para generar los correos.")
+
+if base_df is not None:
+    c_p1, c_p2 = st.columns(2)
+    with c_p1:
+        tam_lote = st.number_input("Contratos por correo (lote)", min_value=20, max_value=200, value=80, step=10,
+                                   help="Si un ordenador supera el lote, se divide en Parte 1 de N para no superar el límite de Excel (32.767 caracteres).")
+    with c_p2:
+        st.caption(f"Fuente base: {origen_base}")
+        n_pend_f = int((~f["EN_ALFRESCO"].astype(bool)).sum()) if "EN_ALFRESCO" in f.columns else 0
+        st.caption(f"Pendientes en el filtro actual: {fmt_num(n_pend_f)}")
+    if st.button("✉️ Generar Excel de correos", use_container_width=True, key="btn_gen_correos"):
+        st.session_state["correos_generados"] = True
+    if st.session_state.get("correos_generados"):
+        try:
+            xlsx_bytes, df_correos, df_ctrl, n_omit, df_omit, sin_correo = _construir_excel_correos(f, base_df, tam_lote=int(tam_lote))
+        except ValueError as e:
+            st.error(str(e))
+            xlsx_bytes = None
+        except Exception:
+            st.error("No se pudo generar el Excel de correos. Verifique ambas fuentes.")
+            xlsx_bytes = None
+        if xlsx_bytes is not None:
+            if df_correos.empty:
+                st.warning("No hay contratos pendientes con ordenador para los filtros actuales.")
+            else:
+                st.success(f"✓ {fmt_num(len(df_correos))} correos para {fmt_num(df_ctrl['ORDENADOR_CENTRO'].nunique())} ordenadores.")
+            if n_omit:
+                st.warning(f"Se omitieron {fmt_num(n_omit)} contratos sin ORDENADOR_CENTRO (NaN/vacío). Por ahora se ignoran; a futuro esas filas no deberían existir en el Excel fuente.")
+                with st.expander("Ver contratos omitidos (sin ordenador)"):
+                    cols_o = [c for c in ["CONTRATO", "TIPO", "CENTRO_COSTO", "NOMBRE_CONTRATISTA", "OBJETO_CONTRATO"] if c in df_omit.columns]
+                    st.dataframe(df_omit[cols_o] if cols_o else df_omit, use_container_width=True, hide_index=True)
+                    st.download_button("⬇️ Descargar omitidos en CSV", df_omit.to_csv(index=False).encode("utf-8-sig"),
+                                       "contratos_sin_ordenador.csv", "text/csv", key="dl_omit")
+            if sin_correo:
+                st.warning(f"{len(sin_correo)} ordenadores del filtro no tienen correo en la base y se excluyeron.")
+            if not df_correos.empty:
+                st.markdown("**Vista previa (primeros 10)**")
+                _prev = df_ctrl.head(10)
+                st.dataframe(_prev, use_container_width=True, hide_index=True)
+                with st.expander("Ver ejemplo de cuerpo del primer correo"):
+                    st.text(str(df_correos.iloc[0]["cuerpo del correo"])[:3000])
+                st.download_button(
+                    "⬇️ Descargar Excel de correos",
+                    xlsx_bytes,
+                    f"Correos_ordenadores_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    key="dl_correos",
+                )
